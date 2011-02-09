@@ -1,0 +1,27 @@
+ROADMAP
+=======
+
+- loader.py script (./loader.py [vmx.sys])
+- find a location for CONTROL_AREA
+
+- VMCS reconfiguration (pour catcher les exceptions) 
+- handle processor exceptions (div by 0, etc)
+- cpu emulation for memory breakpoints ?
+- memory virtualization or buffer relocation (ptes direct manipulation)
+- virtualization of dr registers and debug msrs
+- ida debug stub ?
+
+
+0.1
+---
+
+- initial release
+
+
+0.2
+---
+
+- x86 support
+ 
+
+

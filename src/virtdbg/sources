@@ -1,0 +1,16 @@
+TARGETNAME=virtdbg
+TARGETTYPE=DRIVER
+TARGETPATH=..\..\build\virtdbg
+
+INCLUDES=.
+
+SOURCES=\
+    snprintf.c \
+    mem.c \
+    debug.c \
+    vmx.c \
+    virtdbg.c 
+
+AMD64_SOURCES=\
+    amd64.asm
+

@@ -1,0 +1,4 @@
+DIRS = amd64 \
+       virtdbg \
+       loader
+

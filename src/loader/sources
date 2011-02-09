@@ -1,0 +1,10 @@
+TARGETNAME=loader
+TARGETPATH=..\..\build\loader
+TARGETTYPE=PROGRAM
+UMTYPE=console
+USE_LIBCMT=1
+
+SOURCES=loader.c
+
+
+

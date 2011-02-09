@@ -1,0 +1,10 @@
+syntax: glob
+*.pyc
+*.pdb
+
+syntax: regexp
+^src/.*/objchk_.*$
+^src/.*/objfre_.*$
+^src/buildchk.*$
+^build/.*$
+^ext/.*$
