@@ -4,12 +4,16 @@ TARGETPATH=..\..\build\virtdbg
 
 INCLUDES=.
 
+MSC_WARNING_LEVEL=/W4 /wd4201 /wd4214 /wd4100
+
 SOURCES=\
     snprintf.c \
     mem.c \
     debug.c \
+    protocol.c \
     vmx.c \
-    virtdbg.c 
+    virtdbg.c \
+    driver.c
 
 AMD64_SOURCES=\
     amd64.asm

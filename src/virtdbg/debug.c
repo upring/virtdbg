@@ -1,63 +1,13 @@
 #include "debug.h"
 
-PCONTROL_AREA g_ControlArea = NULL;
-static PVOID g_SendArea = NULL;
-static PVOID g_RecvArea = NULL;
-
 static ULONG32 g_Id;
 static PKSPIN_LOCK g_FreezeLock;
+static ULONG32 g_pagefaults = 0;
 
-extern PVIRT_CPU *g_cpus;
-
-NTSTATUS InitControlArea()
-{
-    PHYSICAL_ADDRESS l1, l2, l3;
-
-    l1.QuadPart = 0;
-    l2.QuadPart = -1;
-    l3.QuadPart = 0x200000;
-    
-    g_ControlArea = (PCONTROL_AREA)MmAllocateContiguousMemorySpecifyCache(CONTROL_AREA_SIZE, 
-            l1, l2, l3, MmCached);
-
-    if (g_ControlArea == NULL)
-        return STATUS_NO_MEMORY;
-
-    RtlZeroMemory(g_ControlArea, CONTROL_AREA_SIZE);
-
-    g_ControlArea->Magic1 = 0xbabebabe;
-    g_ControlArea->Magic2 = 0xcafecafe;
-
-    g_SendArea = AllocateMemory(0x1000);
-
-    if (g_SendArea == NULL)
-        return STATUS_NO_MEMORY;
-
-    g_ControlArea->SendArea = MmGetPhysicalAddress(g_SendArea);
-
-    g_RecvArea = AllocateMemory(0x1000);
-
-    if (g_RecvArea == NULL)
-        return STATUS_NO_MEMORY;
-
-    g_ControlArea->RecvArea = MmGetPhysicalAddress(g_RecvArea);
-
-    g_ControlArea->KernelBase = 0;
-    g_ControlArea->DebuggerData = 0;
-
-    return STATUS_SUCCESS;
-}
 
 
 NTSTATUS InitDebugLayer()
 {
-    PHYSICAL_ADDRESS PhysicalAddress;
-    PVOID pLogBuffer;
-    
-    _Int3();
-    InitControlArea();
-    g_ControlArea->LogBuffer = InitLog();
-
     g_FreezeLock = AllocateMemory(sizeof(KSPIN_LOCK));
 
     if (!g_FreezeLock)
@@ -68,146 +18,730 @@ NTSTATUS InitDebugLayer()
     return STATUS_SUCCESS;
 }
 
-VOID ShutdownDebug()
-{
+/*VOID ShutdownDebug()*/
+/*{*/
 /*    MmUnmapIoSpace(g_RecvBase, 0x1000);*/
-    return;
+/*    return;*/
+/*}*/
+
+
+BOOLEAN HandleVmInstruction(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
+{
+    ULONG64 InstructionLength, Rip;
+    
+    Rip = _ReadVMCS(GUEST_RIP);
+    DbgLog(("VmInstruction: guest_rip = 0x%llx\n", Rip));
+    
+    /* _VmFailInvalid */
+    _WriteVMCS(GUEST_RFLAGS, _ReadVMCS(GUEST_RFLAGS) | 0x1);
+
+    InstructionLength = _ReadVMCS(VM_EXIT_INSTRUCTION_LEN);
+    _WriteVMCS(GUEST_RIP, _ReadVMCS(GUEST_RIP)+InstructionLength);
+
+    return TRUE;
 }
 
-
-ULONG32 CalcChecksum(PVOID Src, ULONG32 Size)
+BOOLEAN HandleVmCall(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
 {
-    ULONG32 Checksum;
-    ULONG32 i;
+    ULONG64 InstructionLength, Rip, Rsp;
 
-    Checksum = 0;
-    for (i=0;i<Size;i++)
+    Rip = _ReadVMCS(GUEST_RIP);
+    DbgLog(("VmCall: guest_rip = 0x%llx\n", Rip));
+
+    InstructionLength = _ReadVMCS(VM_EXIT_INSTRUCTION_LEN);
+
+    if ((pGuestRegs->rax == 0x42424242) && (pGuestRegs->rbx == 0x43434343)) 
     {
-        Checksum += *((PUCHAR)Src+i);
+        DbgLog(("got magic sequence, terminating\n"));
+        Rip = (ULONG64)_GuestExit;
+        Rsp = pGuestRegs->rsp;
+        DbgLog(("restoring rip=0x%llx, rsp=0x%llx\n", Rip, Rsp));
+        _VmxOff(Rip, Rsp);
+    }
+    else
+    {
+        _WriteVMCS(GUEST_RIP, Rip+InstructionLength);
     }
 
-    return Checksum;
+    
+    return TRUE;
 }
 
 
-BOOLEAN SendPacket(PVOID pPacket, ULONG32 MaxRetries)
+BOOLEAN HandleUnimplemented(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs, ULONG64 ExitCode)
 {
-    PPACKET_HEADER pHeader;
-    ULONG32 Size, retries;
-    BOOLEAN result;
-    int i;
+    ULONG64 InstructionLength;
 
-    retries = 0;
+    DbgLog(("vmx: unimplemented\n"));
+    DbgLog(("vmx: exitcode = 0x%llx\n", ExitCode));
+    DbgLog(("vmx: guest_rip = 0x%llx\n", _ReadVMCS(GUEST_RIP)));
 
-    pHeader = (PPACKET_HEADER)pPacket;
-    pHeader->Id = g_Id;
-    Size = pHeader->Size+sizeof(PACKET_HEADER);
-    RtlCopyMemory(g_SendArea, pPacket, Size);
+    InstructionLength = _ReadVMCS(VM_EXIT_INSTRUCTION_LEN);
+    _WriteVMCS(GUEST_RIP, _ReadVMCS(GUEST_RIP)+InstructionLength);
 
-    do
-    {
-        pHeader = (PPACKET_HEADER)((PUCHAR)g_SendArea+Size);
-        if (pHeader->Type == PACKET_TYPE_RESET)
-        {
-            g_Id = INITIAL_ID;
-            DbgLog(("resetting id to 0x%x\n", g_Id));
-            continue;
-        }
-
-        if ((pHeader->Magic == PACKET_MAGIC) && 
-                (pHeader->Type == PACKET_TYPE_ACK) && 
-                (pHeader->Id == g_Id))
-        {
-            result = TRUE;
-            DbgLog(("Sent packet (id=0x%x)\n", g_Id));
-            g_Id++;
-            break;
-        }
-
-        retries++;
-        if (retries >= MaxRetries)
-        {
-/*            if (retries == MAX_RETRIES)*/
-/*                DbgLog(("timeout when sending packet (id=0x%x)\n", g_Id));*/
-            result = FALSE;
-            break;
-        }
-
-    } while (42);
-
-    DestroyPacket(pPacket);
-    return result;
-
+    return TRUE;
 }
 
-PVOID ReceivePacket(ULONG32 MaxRetries)
+BOOLEAN InjectInt1(ULONG64 Rip)
 {
-    PVOID pPacket;
-    PPACKET_HEADER pHeader, pAck;
-    ULONG32 HeaderSize, Size, Checksum, retries;
-    int i;
+    ULONG32 InjectEvent;
+    PINTERRUPT_INJECT_INFO_FIELD pInjectEvent;
 
-    retries = 0;
+    InjectEvent = 0;
+    pInjectEvent = (PINTERRUPT_INJECT_INFO_FIELD)&InjectEvent;
 
-    do
+    pInjectEvent->Vector = DEBUG_EXCEPTION; 
+    pInjectEvent->InterruptionType = HARDWARE_EXCEPTION;
+ 
+    pInjectEvent->DeliverErrorCode = 0;
+    pInjectEvent->Valid = 1;
+    _WriteVMCS(VM_ENTRY_INTR_INFO_FIELD, InjectEvent);
+
+    return TRUE;
+}
+
+
+BOOLEAN HandleCpuid(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
+{
+    ULONG32 Function, eax, ebx, ecx, edx;
+    ULONG64 InstructionLength;
+
+    Function = (ULONG32)pGuestRegs->rax;
+    ecx = (ULONG32)pGuestRegs->rcx;
+/*    DbgLog(("vmx: cpuid on processor #%d: Function=0x%x\n",*/
+/*            KeGetCurrentProcessorNumber(), Function));*/
+/*    DbgLog(("vmx: HandleCpuid(): guest_rip = 0x%llx\n", _ReadVMCS(GUEST_RIP)));*/
+    _CpuId(Function, &eax, &ebx, &ecx, &edx);
+    pGuestRegs->rax = eax;
+    pGuestRegs->rbx = ebx;
+    pGuestRegs->rcx = ecx;
+    pGuestRegs->rdx = edx;
+
+    InstructionLength = _ReadVMCS(VM_EXIT_INSTRUCTION_LEN);
+    _WriteVMCS(GUEST_RIP, _ReadVMCS(GUEST_RIP)+InstructionLength);
+
+    return TRUE;
+}
+
+BOOLEAN HandleMsrRead(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
+{
+    LARGE_INTEGER Msr;
+    ULONG32 ecx;
+    ULONG64 InstructionLength;
+
+    ecx = (ULONG32)pGuestRegs->rcx;
+
+    DbgLog(("vmx: HandleMsrRead(): msr = 0x%x\n", ecx));
+
+    switch (ecx)
     {
-        pHeader = (PPACKET_HEADER)(g_RecvArea);
-        if (pHeader->Type == PACKET_TYPE_RESET)
-        {
-            if (g_Id != INITIAL_ID)
-            {
-                DbgLog(("resetting id to 0x%x\n", INITIAL_ID));
-                g_Id = INITIAL_ID;
-            }
-            continue;
-        }
+        case MSR_IA32_SYSENTER_CS:
+            Msr.QuadPart = _ReadVMCS(GUEST_SYSENTER_CS);
+            break;
+        
+        case MSR_IA32_SYSENTER_ESP:
+            Msr.QuadPart = _ReadVMCS(GUEST_SYSENTER_ESP);
+            break;
 
-        if (pHeader->Id == g_Id)
-        {
-            HeaderSize = pHeader->Size;
-            if (HeaderSize <= MAX_PACKET_SIZE)
-            {
-                Size = sizeof(PACKET_HEADER) + HeaderSize;
-                pPacket = AllocateMemory(Size);
-                if (pPacket == NULL)
-                {
-                    return NULL;
-                }
-                
-                RtlCopyMemory(pPacket, g_RecvArea, Size);
+        case MSR_IA32_SYSENTER_EIP:
+            Msr.QuadPart = _ReadVMCS(GUEST_SYSENTER_EIP);
+            break;
+    
+        case MSR_GS_BASE:
+            Msr.QuadPart = _ReadVMCS(GUEST_GS_BASE);
+            break;
 
-                if (HeaderSize > 0)
-                {
-                    Checksum = CalcChecksum((PUCHAR)pPacket+sizeof(PACKET_HEADER), HeaderSize);
-                    if (Checksum != pHeader->Checksum)
+        case MSR_FS_BASE:
+            Msr.QuadPart = _ReadVMCS(GUEST_FS_BASE);
+            break;
+
+        default:
+            Msr.QuadPart = _ReadMsr(ecx);
+            break;
+    }
+
+    pGuestRegs->rax = Msr.LowPart;
+    pGuestRegs->rdx = Msr.HighPart;
+
+    InstructionLength = _ReadVMCS(VM_EXIT_INSTRUCTION_LEN);
+    _WriteVMCS(GUEST_RIP, _ReadVMCS(GUEST_RIP)+InstructionLength);
+
+    return TRUE;
+}
+
+BOOLEAN HandleMsrWrite(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
+{
+    LARGE_INTEGER Msr;
+    ULONG32 ecx;
+    ULONG64 InstructionLength;
+
+    ecx = (ULONG32)pGuestRegs->rcx;
+
+    DbgLog(("vmx: HandleMsrWrite(): msr = 0x%x\n", ecx));
+    Msr.LowPart = (ULONG32)pGuestRegs->rax;
+    Msr.HighPart = (ULONG32)pGuestRegs->rdx;
+
+    switch (ecx)
+    {
+        case MSR_IA32_SYSENTER_CS:
+            _WriteVMCS(GUEST_SYSENTER_CS, Msr.QuadPart);
+            break;
+        
+        case MSR_IA32_SYSENTER_ESP:
+            _WriteVMCS(GUEST_SYSENTER_ESP, Msr.QuadPart);
+            break;
+
+        case MSR_IA32_SYSENTER_EIP:
+            _WriteVMCS(GUEST_SYSENTER_EIP, Msr.QuadPart);
+            break;
+    
+        case MSR_GS_BASE:
+            _WriteVMCS(GUEST_GS_BASE, Msr.QuadPart);
+            break;
+
+        case MSR_FS_BASE:
+            _WriteVMCS(GUEST_FS_BASE, Msr.QuadPart);
+            break;
+
+        default:
+            _WriteMsr(ecx, Msr.QuadPart);
+            break;
+    }
+
+    InstructionLength = _ReadVMCS(VM_EXIT_INSTRUCTION_LEN);
+    _WriteVMCS(GUEST_RIP, _ReadVMCS(GUEST_RIP)+InstructionLength);
+
+    return TRUE;
+}
+
+
+BOOLEAN HandleDrAccess(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
+{
+    DbgLog(("DrAccess\n"));
+    return TRUE;
+}
+
+
+BOOLEAN HandleCrAccess(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
+{
+    PMOV_CR_QUALIFICATION pExitQualification;
+    ULONG64 Exit;
+    ULONG64 Cr;
+    ULONG64 Reg;
+    ULONG64 InstructionLength;
+
+    Exit =_ReadVMCS(EXIT_QUALIFICATION);
+    pExitQualification = (PMOV_CR_QUALIFICATION)&Exit;
+    
+    switch (pExitQualification->ControlRegister)
+    {
+        case CR0:
+            Cr = _ReadVMCS(GUEST_CR0);
+            break;
+
+        case CR3:
+            Cr = _ReadVMCS(GUEST_CR3);
+            break;
+
+        case CR4:
+            Cr = _ReadVMCS(GUEST_CR4);
+            break;
+
+        default:
+            _Int3();
+            break;
+    }
+
+    switch (pExitQualification->Register)
+    {
+        case RAX:
+            Reg = pGuestRegs->rax;
+            break;
+
+        case RCX:
+            Reg = pGuestRegs->rcx;
+            break;
+
+        case RDX:
+            Reg = pGuestRegs->rdx;
+            break;
+
+        case RBX:
+            Reg = pGuestRegs->rbx;
+            break;
+
+        case RSP:
+            Reg = pGuestRegs->rsp;
+            break;
+
+        case RBP:
+            Reg = pGuestRegs->rbp;
+            break;
+
+        case RSI:
+            Reg = pGuestRegs->rsi;
+            break;
+
+        case RDI:
+            Reg = pGuestRegs->rdi;
+            break;
+
+        case R8:
+            Reg = pGuestRegs->r8;
+            break;
+
+        case R9:
+            Reg = pGuestRegs->r9;
+            break;
+
+        case R10:
+            Reg = pGuestRegs->r10;
+            break;
+
+        case R11:
+            Reg = pGuestRegs->r11;
+            break;
+
+        case R12:
+            Reg = pGuestRegs->r12;
+            break;
+
+        case R13:
+            Reg = pGuestRegs->r13;
+            break;
+
+        case R14:
+            Reg = pGuestRegs->r14;
+            break;
+
+        case R15:
+            Reg = pGuestRegs->r15;
+            break;
+
+        default:
+            _Int3();
+            break;
+
+    }
+
+    switch (pExitQualification->AccessType)
+    {
+        case MOV_TO_CR:
+            switch (pExitQualification->ControlRegister)
+            {
+                case CR0:
+                    _WriteVMCS(GUEST_CR0, Reg);
+                    break;
+
+                case CR3:
+                    if (pCpu->ProcessorNumber == 0)
                     {
-                        UnAllocateMemory(pPacket);
-                        return NULL;
+/*                        EnterDebugger(pCpu, pGuestRegs, Reg);*/
+                        _WriteVMCS(GUEST_CR3, Reg);
                     }
-                }
+                    else
+                    {
+                        _WriteVMCS(GUEST_CR3, Reg);
+                    }
+                    break;
 
-                pAck = (PPACKET_HEADER)((PUCHAR)(g_RecvArea)+Size);
-                pAck->Magic = PACKET_MAGIC;
-                pAck->Type = PACKET_TYPE_ACK;
-                pAck->Id = g_Id;
+                case CR4:
+                    _WriteVMCS(GUEST_CR4, Reg);
+                    break;
 
-                DbgLog(("Received packet (id=0x%x)\n", g_Id));
-                g_Id++;
-
-                return pPacket;
+                default:
+                    _Int3();
+                    break;
             }
-        }
-        retries++;
-        if (retries >= MaxRetries)
-        {
-/*            if (retries >= MAX_RETRIES)*/
-/*                DbgLog(("timeout when receiving packet (id=0x%x) (retries=0x%x)\n", g_Id, retries));*/
-            return NULL;
-        }
+            break;
 
-    } while (42);
+        case MOV_FROM_CR:
+            switch (pExitQualification->Register)
+            {
+                case RAX:
+                    pGuestRegs->rax = Cr;
+                    break;
+
+                case RCX:
+                    pGuestRegs->rcx = Cr;
+                    break;
+
+                case RDX:
+                    pGuestRegs->rdx = Cr;
+                    break;
+
+                case RBX:
+                    pGuestRegs->rbx = Cr;
+                    break;
+
+                case RSP:
+                    pGuestRegs->rsp = Cr;
+                    break;
+
+                case RBP:
+                    pGuestRegs->rbp = Cr;
+                    break;
+
+                case RSI:
+                    pGuestRegs->rsi = Cr;
+                    break;
+
+                case RDI:
+                    pGuestRegs->rdi = Cr;
+                    break;
+
+                case R8:
+                    pGuestRegs->r8 = Cr;
+                    break;
+
+                case R9:
+                    pGuestRegs->r9 = Cr;
+                    break;
+
+                case R10:
+                    pGuestRegs->r10 = Cr;
+                    break;
+
+                case R11:
+                    pGuestRegs->r11 = Cr;
+                    break;
+
+                case R12:
+                    pGuestRegs->r12 = Cr;
+                    break;
+
+                case R13:
+                    pGuestRegs->r13 = Cr;
+                    break;
+
+                case R14:
+                    pGuestRegs->r14 = Cr;
+                    break;
+
+                case R15:
+                    pGuestRegs->r15 = Cr;
+                    break;
+
+                default:
+                    _Int3();
+                    break;
+            }
+
+            break;
+
+        default:
+            _Int3();
+            break;
+    }
+
+    InstructionLength = _ReadVMCS(VM_EXIT_INSTRUCTION_LEN);
+    _WriteVMCS(GUEST_RIP, _ReadVMCS(GUEST_RIP)+InstructionLength);
+
+    return TRUE;
 }
 
+BOOLEAN HandleException(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
+{
+    ULONG32 Event, InjectEvent;
+    ULONG64 ErrorCode, ExitQualification, GuestRip;
+    PINTERRUPT_INFO_FIELD pEvent;
+    PINTERRUPT_INJECT_INFO_FIELD pInjectEvent;
+
+    Event = (ULONG32)_ReadVMCS(VM_EXIT_INTR_INFO);
+    pEvent = (PINTERRUPT_INFO_FIELD)&Event;
+    
+    InjectEvent = 0;
+    pInjectEvent = (PINTERRUPT_INJECT_INFO_FIELD)&InjectEvent;
+    
+    GuestRip = _ReadVMCS(GUEST_RIP);
+
+    switch (pEvent->InterruptionType)
+    {
+        case NMI_INTERRUPT:
+            DbgLog(("vmx: HandleNmi()\n"));
+            InjectEvent = 0;
+            pInjectEvent->Vector = NMI_INTERRUPT;
+            pInjectEvent->InterruptionType = NMI_INTERRUPT;
+            pInjectEvent->DeliverErrorCode = 0;
+            pInjectEvent->Valid = 1;
+            _WriteVMCS(VM_ENTRY_INTR_INFO_FIELD, InjectEvent);
+            break;
+
+        case EXTERNAL_INTERRUPT:
+            DbgLog(("vmx: HandleExternalInterrupt()\n"));
+            break;
+
+        case HARDWARE_EXCEPTION:
+            switch (pEvent->Vector)
+            {
+                case DEBUG_EXCEPTION:
+                    DbgLog(("vmx: int1 guest_rip = 0x%llx\n", 
+                        GuestRip));
+
+/*                    ReportException(pCpu, pGuestRegs, pEvent->Vector, GuestRip);*/
+/*                    {*/
+/*                        DbgLog(("invalid state\n"));*/
+/*                        InjectEvent = 0;*/
+/*                        pInjectEvent->Vector = DEBUG_EXCEPTION; */
+/*                        pInjectEvent->InterruptionType = HARDWARE_EXCEPTION;*/
+/*                        pInjectEvent->DeliverErrorCode = 0;*/
+/*                        pInjectEvent->Valid = 1;*/
+/*                        _WriteVMCS(VM_ENTRY_INTR_INFO_FIELD, InjectEvent);*/
+/*                        _WriteVMCS(GUEST_RIP, _ReadVMCS(GUEST_RIP));*/
+/*                    }*/
+                    break;
+
+                case PAGE_FAULT_EXCEPTION:
+                    InterlockedIncrement(&g_pagefaults);
+                    ErrorCode = _ReadVMCS(VM_EXIT_INTR_ERROR_CODE);
+                    ExitQualification = _ReadVMCS(EXIT_QUALIFICATION);
+/*                    if (g_pagefaults < 10)*/
+/*                    {*/
+/*                        DbgLog(("vmx: Exception(): guest_rip = 0x%llx\n", */
+/*                            GuestRip));*/
+
+/*                        DbgLog(("pagefault #%d\n", g_pagefaults));*/
+/*                        DbgLog(("vmx: page fault\n"));*/
+/*                        DbgLog(("vmx: error=0x%x\n", ErrorCode));*/
+/*                        DbgLog(("vmx: address=0x%llx\n", ExitQualification));*/
+/*                    }*/
+                    
+                    _SetCr2(ExitQualification);
+                    _WriteVMCS(VM_ENTRY_EXCEPTION_ERROR_CODE, ErrorCode);
+                    InjectEvent = 0;
+                    pInjectEvent->Vector = PAGE_FAULT_EXCEPTION;
+                    pInjectEvent->InterruptionType = HARDWARE_EXCEPTION;
+                    pInjectEvent->DeliverErrorCode = 1;
+                    pInjectEvent->Valid = 1;
+                    _WriteVMCS(VM_ENTRY_INTR_INFO_FIELD, InjectEvent);
+                    _WriteVMCS(GUEST_RIP, _ReadVMCS(GUEST_RIP));
+                    break;
+
+                default:
+                    DbgLog(("vmx: Hardware Exception (vector=0x%x)\n",
+                        pEvent->Vector));
+                    break;
+            }
+
+            break;
+
+        case SOFTWARE_EXCEPTION:
+            /* #BP (int3) and #OF (into) */
+            
+            switch (pEvent->Vector)
+            {
+                case BREAKPOINT_EXCEPTION:
+                    DbgLog(("vmx: int3\n"));
+                    DbgLog(("vmx: Exception(): guest_rip = 0x%llx\n", 
+                        GuestRip));
+
+/*                    pBreakpoint = GetBreakpointWithAddress(GuestRip,*/
+/*                            SOFTWARE_BREAKPOINT_TYPE); */
+
+/*                    if (pBreakpoint == NULL)*/
+/*                    {*/
+                    InjectEvent = 0;
+                    pInjectEvent->Vector = BREAKPOINT_EXCEPTION;
+                    pInjectEvent->InterruptionType = SOFTWARE_INTERRUPT;
+                    pInjectEvent->DeliverErrorCode = 0;
+                    pInjectEvent->Valid = 1;
+                    _WriteVMCS(VM_ENTRY_INTR_INFO_FIELD, InjectEvent);
+                    _WriteVMCS(VM_ENTRY_INSTRUCTION_LEN, 1);
+                    _WriteVMCS(GUEST_RIP, GuestRip);
+/*                    }*/
+/*                    else*/
+/*                    {*/
+/*                        ReportEvent(pBreakpoint);*/
+/*                    }*/
+                    break;
+
+                case OVERFLOW_EXCEPTION:
+                default:
+                    DbgLog(("vmx: Software Exception (vector=0x%x)\n",
+                        pEvent->Vector));
+
+                    break;
+            }
+            break;
+        
+        default:
+            DbgLog(("vmx: unknown interruption type\n"));
+            break;
+    }
+
+    return TRUE;
+}
+
+BOOLEAN HandleInvd(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
+{
+    ULONG64 InstructionLength;
+
+    DbgLog(("vmx: invd\n"));
+    _Invd();
+
+    InstructionLength = _ReadVMCS(VM_EXIT_INSTRUCTION_LEN);
+    _WriteVMCS(GUEST_RIP, _ReadVMCS(GUEST_RIP)+InstructionLength);
+    return TRUE;
+}
+
+VOID HandleVmExit(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
+{
+    ULONG64 ExitCode;
+    KIRQL OldIrql, CurrentIrql;
+    
+    OldIrql = 0;
+    CurrentIrql = KeGetCurrentIrql();
+    if (CurrentIrql < DISPATCH_LEVEL)
+    {
+        OldIrql = KeRaiseIrqlToDpcLevel();
+    }
+   
+    pGuestRegs->rsp = _ReadVMCS(GUEST_RSP);
+    ExitCode = _ReadVMCS(VM_EXIT_REASON);
+
+    switch (ExitCode)
+    {
+        case EXIT_REASON_EXCEPTION_NMI:      
+            HandleException(pCpu, pGuestRegs);
+            break;
+
+        case EXIT_REASON_EXTERNAL_INTERRUPT: 
+            HandleUnimplemented(pCpu, pGuestRegs, ExitCode);
+            break;
+
+        case EXIT_REASON_TRIPLE_FAULT:       
+            HandleUnimplemented(pCpu, pGuestRegs, ExitCode);
+            break;
+
+        case EXIT_REASON_INIT:               
+            HandleUnimplemented(pCpu, pGuestRegs, ExitCode);
+            break;
+
+        case EXIT_REASON_SIPI:               
+            HandleUnimplemented(pCpu, pGuestRegs, ExitCode);
+            break;
+
+        case EXIT_REASON_IO_SMI:             
+            HandleUnimplemented(pCpu, pGuestRegs, ExitCode);
+            break;
+
+        case EXIT_REASON_OTHER_SMI:          
+            HandleUnimplemented(pCpu, pGuestRegs, ExitCode);
+            break;
+
+        case EXIT_REASON_PENDING_INTERRUPT:  
+            HandleUnimplemented(pCpu, pGuestRegs, ExitCode);
+            break;
+
+        case EXIT_REASON_TASK_SWITCH:        
+            HandleUnimplemented(pCpu, pGuestRegs, ExitCode);
+            break;
+
+        case EXIT_REASON_CPUID:
+            HandleCpuid(pCpu, pGuestRegs);
+            break;
+
+        case EXIT_REASON_HLT:                
+            HandleUnimplemented(pCpu, pGuestRegs, ExitCode);
+            break;
+
+        case EXIT_REASON_INVD:               
+            HandleInvd(pCpu, pGuestRegs);
+            break;
+
+        case EXIT_REASON_INVLPG:             
+            HandleUnimplemented(pCpu, pGuestRegs, ExitCode);
+            break;
+
+        case EXIT_REASON_RDPMC:              
+            HandleUnimplemented(pCpu, pGuestRegs, ExitCode);
+            break;
+
+        case EXIT_REASON_RDTSC:              
+            HandleUnimplemented(pCpu, pGuestRegs, ExitCode);
+            break;
+
+        case EXIT_REASON_RSM:                
+            HandleUnimplemented(pCpu, pGuestRegs, ExitCode);
+            break;
+
+        case EXIT_REASON_VMCALL:             
+            HandleVmCall(pCpu, pGuestRegs);
+            break;
+
+        case EXIT_REASON_VMCLEAR:            
+        case EXIT_REASON_VMLAUNCH:           
+        case EXIT_REASON_VMPTRLD:            
+        case EXIT_REASON_VMPTRST:            
+        case EXIT_REASON_VMREAD:             
+        case EXIT_REASON_VMRESUME:           
+        case EXIT_REASON_VMWRITE:            
+        case EXIT_REASON_VMXOFF:             
+        case EXIT_REASON_VMXON:
+            HandleVmInstruction(pCpu, pGuestRegs);
+            break;
+
+        case EXIT_REASON_CR_ACCESS:
+            HandleCrAccess(pCpu, pGuestRegs);
+            break;
+
+        case EXIT_REASON_DR_ACCESS:
+            HandleDrAccess(pCpu, pGuestRegs);
+/*            HandleUnimplemented(pCpu, pGuestRegs, ExitCode);*/
+            break;
+
+        case EXIT_REASON_IO_INSTRUCTION:     
+            HandleUnimplemented(pCpu, pGuestRegs, ExitCode);
+            break;
+
+        case EXIT_REASON_MSR_READ:
+            HandleMsrRead(pCpu, pGuestRegs);
+            break;
+
+        case EXIT_REASON_MSR_WRITE:          
+            HandleMsrWrite(pCpu, pGuestRegs);
+            break;
+
+        case EXIT_REASON_INVALID_GUEST_STATE:        
+            HandleUnimplemented(pCpu, pGuestRegs, ExitCode);
+            break;
+
+        case EXIT_REASON_MSR_LOADING:
+            HandleUnimplemented(pCpu, pGuestRegs, ExitCode);
+            break;
+
+        case EXIT_REASON_MWAIT_INSTRUCTION:
+            HandleUnimplemented(pCpu, pGuestRegs, ExitCode);
+            break;
+
+        case EXIT_REASON_MONITOR_INSTRUCTION:
+            HandleUnimplemented(pCpu, pGuestRegs, ExitCode);
+            break;
+
+        case EXIT_REASON_PAUSE_INSTRUCTION:  
+            HandleUnimplemented(pCpu, pGuestRegs, ExitCode);
+            break;
+
+        case EXIT_REASON_MACHINE_CHECK:
+            HandleUnimplemented(pCpu, pGuestRegs, ExitCode);
+            break;
+
+        case EXIT_REASON_TPR_BELOW_THRESHOLD:
+            HandleUnimplemented(pCpu, pGuestRegs, ExitCode);
+            break;
+
+        default:
+            HandleUnimplemented(pCpu, pGuestRegs, ExitCode);
+            break;
+    }
+
+    _WriteVMCS(GUEST_RSP, pGuestRegs->rsp);
+    if (CurrentIrql < DISPATCH_LEVEL)
+    {
+        KeLowerIrql(OldIrql);
+    }
+
+}
 
 VOID EnableTF()
 {
@@ -227,74 +761,6 @@ VOID DisableTF()
     Rflags &= ~TF;
     _WriteVMCS(GUEST_RFLAGS, Rflags);
 
-}
-
-PVOID CreateBreakinPacket()
-{
-    PVOID pPacket;
-    PPACKET_HEADER pHeader;
-    ULONG32 Size;
-
-    Size = sizeof(PACKET_HEADER)+sizeof(BREAKIN_PACKET);
-
-    pPacket = AllocateMemory(Size);
-    if (pPacket == NULL)
-        return NULL;
-
-    pHeader = (PPACKET_HEADER)pPacket;
-    pHeader->Magic = PACKET_MAGIC;
-    pHeader->Type = PACKET_TYPE_BREAKIN;
-    pHeader->Size = sizeof(BREAKIN_PACKET);
-
-    return pPacket;
-
-}
-
-PVOID CreateManipulateStatePacket(ULONG32 ApiNumber, ULONG32 Data2Size)
-{
-    PVOID pPacket;
-    PPACKET_HEADER pHeader;
-    PMANIPULATE_STATE_PACKET pData1;
-    ULONG32 Size;
-
-    Size = sizeof(PACKET_HEADER)+sizeof(MANIPULATE_STATE_PACKET)+Data2Size;
-
-    pPacket = AllocateMemory(Size);
-    if (pPacket == NULL)
-        return NULL;
-
-    pHeader = (PPACKET_HEADER)pPacket;
-    pHeader->Magic = PACKET_MAGIC;
-    pHeader->Type = PACKET_TYPE_MANIPULATE_STATE;
-    pHeader->Size = sizeof(MANIPULATE_STATE_PACKET)+Data2Size;
-
-    pData1 = (PMANIPULATE_STATE_PACKET)((PUCHAR)pPacket+sizeof(PACKET_HEADER));
-    pData1->ApiNumber = ApiNumber;
-    return pPacket;
-}
-
-PVOID CreateStateChangePacket(ULONG32 Exception, ULONG64 Address)
-{
-    PVOID pPacket;
-    PPACKET_HEADER pHeader;
-
-    PSTATE_CHANGE_PACKET pData1;
-    ULONG32 Size;
-
-    Size = sizeof(PACKET_HEADER)+sizeof(STATE_CHANGE_PACKET);
-    pPacket = AllocateMemory(Size);
-    if (pPacket == NULL)
-        return NULL;
-
-    pHeader = (PPACKET_HEADER)pPacket;
-    pHeader->Magic = PACKET_MAGIC;
-    pHeader->Type = PACKET_TYPE_STATE_CHANGE;
-    pHeader->Size = sizeof(STATE_CHANGE_PACKET);
-    
-    pData1 = (PSTATE_CHANGE_PACKET)((PUCHAR)pPacket+sizeof(PACKET_HEADER));
-    pData1->Exception = Exception;
-    pData1->Address = Address;
-    return pPacket;
 }
 
 PVOID ReadVirtualMemory(ULONG64 Address, ULONG32 Size)
@@ -654,7 +1120,7 @@ VOID ReportException(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs, ULONG Exception, UL
 
 static VOID FreezeCpu(PKDPC pDpc, PVOID DeferredContext, PVOID SystemArgument1, PVOID SystemArgument2)
 {
-    KIRQL OldIrql;
+/*    KIRQL OldIrql;*/
     
     DbgLog(("cpu frozen\n"));
 
@@ -809,7 +1275,7 @@ VOID DumpPacket(PPACKET_HEADER pHeader)
 
 BOOLEAN EnterDebugger(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs, ULONG64 Cr3) 
 {
-    PPACKET_HEADER pHeader, pResponse;
+    PPACKET_HEADER pHeader;
     PBREAKIN_PACKET pPacket;
     ULONG32 i;
     BOOLEAN result;
@@ -848,110 +1314,6 @@ BOOLEAN EnterDebugger(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs, ULONG64 Cr3)
     DestroyPacket(pHeader);
 
     return result;
-}
-
-
-VOID DestroyPacket(PVOID pPacket)
-{
-    UnAllocateMemory(pPacket);
-}
-
-
-static PVOID g_LogBuffer = NULL;
-static ULONG g_LogCount = 0;
-static ULONG g_LogIndex = 0;
-static PKSPIN_LOCK g_LogLock;
-
-PVOID InitLog()
-{
-    g_LogBuffer = AllocateMemory(LOGBUFFER_SIZE);
-
-    if (g_LogBuffer == NULL)
-        return NULL;
-
-    g_LogLock = AllocateMemory(sizeof(KSPIN_LOCK));
-
-    if (g_LogLock == NULL)
-        return NULL;
-
-    KeInitializeSpinLock(g_LogLock);
-
-    return g_LogBuffer;
-}
-
-static BOOLEAN InsertLogEntry(char *buffer, unsigned short size)
-{
-    PLOGENTRY pEntry;
-    ULONG32 Id;
-
-    if (g_LogBuffer == NULL)
-        return FALSE;
-
-    if (g_LogIndex*sizeof(LOGENTRY) >= LOGBUFFER_SIZE)
-    {
-        g_LogIndex = 0;
-    }
-
-    pEntry = (PLOGENTRY)(g_LogBuffer)+g_LogIndex;
-
-    if (pEntry->Data == NULL)
-    {
-        pEntry->Data = AllocateMemory(size);
-        if (pEntry->Data == NULL)
-            return FALSE;
-    }
-    else
-    {
-        if (pEntry->Size < size)
-        {
-            UnAllocateMemory(pEntry->Data);
-            pEntry->Data = AllocateMemory(size);
-            if (pEntry->Data == NULL)
-                return FALSE;
-        }
-    }
-
-    pEntry->Id = g_LogCount;
-    pEntry->Size = size;
-    RtlCopyMemory(pEntry->Data, buffer, size);
-
-    g_LogCount++;
-    g_LogIndex++;
-    return TRUE;
-
-}
-
-VOID Log(char *format, ...)
-{
-    KIRQL CurrentIrql;
-
-    unsigned short size;
-    va_list args;
-    UCHAR buffer[1024] = {0};
-
-    RtlZeroMemory(&buffer, sizeof(buffer));
-    va_start(args, format);
-
-    CurrentIrql = KeGetCurrentIrql();
-    if (CurrentIrql < DISPATCH_LEVEL)
-    {
-        KeRaiseIrqlToDpcLevel();
-    }
-    
-    KeAcquireSpinLockAtDpcLevel(g_LogLock);
-
-    vsnprintf((PUCHAR)&buffer, sizeof(buffer), (PUCHAR)format, args);
-    buffer[1023] = '\0';
-    size = strlen(buffer);
-
-    InsertLogEntry(buffer, size);
-    
-    KeReleaseSpinLockFromDpcLevel(g_LogLock);
-
-    if (CurrentIrql < DISPATCH_LEVEL)
-    {
-        KeLowerIrql(CurrentIrql);
-    }
 }
 
 

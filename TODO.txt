@@ -1,0 +1,5 @@
+TODO
+====
+
+- handle firewire write in metasm client
+
