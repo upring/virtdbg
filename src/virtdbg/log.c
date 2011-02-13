@@ -1,8 +1,7 @@
 #include "log.h"
 
-static PVOID g_LogBuffer = NULL;
-static ULONG g_LogCount = 0;
-static ULONG g_LogIndex = 0;
+PVOID g_LogBuffer = NULL;
+static LONG g_LogIndex = 0;
 static PKSPIN_LOCK g_LogLock;
 
 PVOID InitLog()
@@ -24,44 +23,18 @@ PVOID InitLog()
 
 static BOOLEAN InsertLogEntry(char *buffer, unsigned short size)
 {
-    PLOGENTRY pEntry;
-    ULONG32 Id;
-
     if (g_LogBuffer == NULL)
         return FALSE;
 
-    if (g_LogIndex*sizeof(LOGENTRY) >= LOGBUFFER_SIZE)
+    if (g_LogIndex+size > LOGBUFFER_SIZE)
     {
+        RtlZeroMemory(g_LogBuffer, LOGBUFFER_SIZE);
         g_LogIndex = 0;
     }
-
-    pEntry = (PLOGENTRY)(g_LogBuffer)+g_LogIndex;
-
-    if (pEntry->Data == NULL)
-    {
-        pEntry->Data = AllocateMemory(size);
-        if (pEntry->Data == NULL)
-            return FALSE;
-    }
-    else
-    {
-        if (pEntry->Size < size)
-        {
-            UnAllocateMemory(pEntry->Data);
-            pEntry->Data = AllocateMemory(size);
-            if (pEntry->Data == NULL)
-                return FALSE;
-        }
-    }
-
-    pEntry->Id = g_LogCount;
-    pEntry->Size = size;
-    RtlCopyMemory(pEntry->Data, buffer, size);
-
-    g_LogCount++;
-    g_LogIndex++;
+    
+    RtlCopyMemory((PUCHAR)g_LogBuffer+g_LogIndex, buffer, size);
+    InterlockedExchangeAdd(&g_LogIndex, size);
     return TRUE;
-
 }
 
 VOID Log(char *format, ...)
@@ -72,7 +45,6 @@ VOID Log(char *format, ...)
     va_list args;
     UCHAR buffer[1024] = {0};
 
-    RtlZeroMemory(&buffer, sizeof(buffer));
     va_start(args, format);
 
     CurrentIrql = KeGetCurrentIrql();
@@ -83,6 +55,15 @@ VOID Log(char *format, ...)
     
     KeAcquireSpinLockAtDpcLevel(g_LogLock);
 
+/*    RtlZeroMemory(&buffer, sizeof(buffer));*/
+/*    vsnprintf((PUCHAR)&buffer, sizeof(buffer), "%d:", g_LogIndex);*/
+/*    buffer[1023] = '\0';*/
+/*    size = strlen(buffer);*/
+
+/*    InsertLogEntry(buffer, size);*/
+/*    */
+
+    RtlZeroMemory(&buffer, sizeof(buffer));
     vsnprintf((PUCHAR)&buffer, sizeof(buffer), (PUCHAR)format, args);
     buffer[1023] = '\0';
     size = strlen(buffer);

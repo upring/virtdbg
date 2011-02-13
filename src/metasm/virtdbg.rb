@@ -189,7 +189,7 @@ class FireWireMem < VirtualString
     end
 
     def get_page(addr, len=@pagelength)
-        puts "1394: get page @ #{addr.to_s(16)}, #{len} bytes"
+#         puts "1394: get page @ #{addr.to_s(16)}, #{len} bytes"
         buf = @device.internal_read(addr, len)
         buf
     end
@@ -212,6 +212,8 @@ def init_1394(device)
     dev = devices[device]
     dev.open
     mem = FireWireMem.new(dev)
+    puts "testing physical memory access..."
+    puts mem.hexdump(0x8000, 0X100)
     mem
 end
 
@@ -247,6 +249,12 @@ class VirtDbgPacket
         raw = @header.str[@header.stroff, @header.length]
         raw << data
         raw
+    end
+
+    def to_s
+        puts @header.to_s
+        puts @data1.to_s if @data1
+        puts @data2.to_s if @data2 and not @data2.kind_of? String
     end
 
     def fixup
@@ -341,42 +349,27 @@ class StateChangePacket < VirtDbgPacket
         @header.type = VirtDbgAPI::PACKET_TYPE_STATE_CHANGE
         @data1 = VirtDbgAPI.alloc_c_struct("STATE_CHANGE_PACKET")
     end
+
+    def exception
+        @data1.exception
+    end
 end
-
-FAKE_CONTEXT = {:rax => 1,
-    :rbx => 2,
-    :rcx => 3,
-    :rdx => 4,
-    :rsi => 5,
-    :rdi => 6,
-    :rbp => 7,
-    :rsp => 8,
-    :r8 => 9,
-    :r9 => 10,
-    :r10 => 11,
-    :r11 => 12,
-    :r12 => 12,
-    :r13 => 13,
-    :r14 => 14,
-    :r15 => 15,
-    :rip => 16,
-    :rflags => 17}
-
 
 PAGE_SIZE = 0x1000
 MAX_PFN = 0x7c000
 MIN_PFN = 0
 
 class VirtDbgImpl
-    attr_accessor :mem, :timeout
+    attr_accessor :mem, :area, :state, :clientid
     def initialize(mem)
         @mem = mem
         @area = nil
         @lastid = 0
-        @clientid = new_clientid
+        @clientid = 0
         @id = VirtDbgAPI::INITIAL_ID
-        @timeout=0.1
         @attached = false
+        @unexpected_packets = []
+        @state = :running
     end
 
     def new_clientid
@@ -386,19 +379,18 @@ class VirtDbgImpl
     def setup
         result = find_control_area
         handshake
-        @attached = true if result
     end
 
     def send_area
-        @area.sendarea.quadpart if @area
-    end
-
-    def recv_area
         @area.recvarea.quadpart if @area
     end
 
+    def recv_area
+        @area.sendarea.quadpart if @area
+    end
+
     def find_control_area
-        puts "searching virtdbg control area..."
+        puts "searching control area..."
         magic = [VirtDbgAPI::CONTROL_AREA_MAGIC1, 
             VirtDbgAPI::CONTROL_AREA_MAGIC2].pack("LL")
 
@@ -416,103 +408,100 @@ class VirtDbgImpl
         @area = VirtDbgAPI.decode_c_struct('VIRTDBG_CONTROL_AREA', 
                                           @mem, control_area_paddr)
 
-        @send_area = @area.sendarea.quadpart
-        @recv_area = @area.recvarea.quadpart
-        puts "send_area @ #{@send_area.to_s(16)}"
-        puts "recv_area @ #{@recv_area.to_s(16)}"
+#         @send_area = @area.recvarea.quadpart
+#         @recv_area = @area.sendarea.quadpart
+        puts "send_area @ #{self.send_area.to_s(16)}"
+        puts "recv_area @ #{self.recv_area.to_s(16)}"
         true
-#         puts area.to_s
     end
 
     def handshake
+        @clientid = new_clientid
+        @lastid = 0
         @area.clientid = @clientid
         while @area.serverid != @clientid
             @mem.invalidate
         end
+        @attached = true
+        puts "handshake done (client id 0x#{@clientid.to_s(16)})"
+    end
+
+    def dumplog
+        @mem.invalidate
+        @mem[@area.logbuffer.quadpart,2048]+@mem[@area.logbuffer.quadpart+2048,2048]
     end
 
     def send_packet_internal(packet)
         packet.header.clientid = @clientid
         packet.header.id = @id
         packet.fixup
+#         puts "###sending###"
+#         puts packet.to_s
         data = packet.encode
-        @mem[@send_area, data.length] = data
+        @mem[self.send_area, data.length] = data
         @id += 1
         data.length
     end
 
-    def send_packet(packet, timeout=@timeout)
+    def send_packet(packet)
         return false if not @attached
+        start = Time.now
         length = send_packet_internal(packet)
-        header = VirtDbgAPI.decode_c_struct('PACKET_HEADER', 
-                                   @mem, @send_area+length)
-
-        result = false
-        delay = 0
-        while delay < timeout
+        while @area.lastclientid != packet.header.id
             @mem.invalidate
-            delay += 0.05
-            sleep(0.05)
-            next if header.magic != VirtDbgAPI::PACKET_MAGIC
-            next if header.clientid != @clientid
-            next if header.size != 0
-            next if header.type != VirtDbgAPI::PACKET_TYPE_ACK
-            next if header.id != packet.id
-            result = true
-            break
-        end 
-        result
-    end
-
-    def recv_packet(timeout=@timeout)
-        return if not @attached
-        delay = 0
-        packet = nil
-        while delay < timeout
-            @mem.invalidate
-            delay += 0.05
-            sleep(0.05)
-            packet = recv_packet_internal
-            break if packet
-        end 
-        packet
+            return false if Time.now-start > 2.0
+        end
+        true 
     end
 
     def dispatch_packet(packet)
-        puts "got an unexpected packet #{packet.inspect}"
-        @unexpected_packets << packet
+        @unexpected_packets << packet if packet
+        puts "got an unexpected packet #{packet.inspect}" if packet
     end
 
-    def recv_packet_with_type(type, timeout=@timeout)
+    def recv_packet_with_type(type)
         packet = nil
-        iterations = 0
-        while not packet
-            packet = recv_packet(timeout)
-            iterations += 1
-            break if packet.kind_of? type or iterations > 10
+        start = Time.now
+        loop do
+            packet = recv_packet
+            break if packet.kind_of? type
+            break if Time.now-start > 2.0
             dispatch_packet packet
         end
         packet
     end
 
+    def recv_packet
+        return if not @attached
+        packet = nil
+        @mem.invalidate
+        packet = recv_packet_internal
+        packet
+    end
+
     def recv_packet_internal
-        data = @mem[@recv_area, VirtDbgAPI::HEADER_SIZE]
+        data = @mem[self.recv_area, VirtDbgAPI::HEADER_SIZE]
         header = VirtDbgAPI.decode_c_struct('PACKET_HEADER', data, 0)
 
         if header.magic != VirtDbgAPI::PACKET_MAGIC
-            puts "no magic number in header"
+#             puts "no magic number in header"
             return
         end
 
         if not (0..VirtDbgAPI::MAX_PACKET_SIZE).cover? header.size 
-            puts "packet too big"
+#             puts "packet too big"
+            return
+        end
+
+        if header.id <= @lastid
+#             puts "not a new packet"
             return
         end
 
         packet_size = VirtDbgAPI::HEADER_SIZE+header.size
 
         if header.size > 0
-            body = @mem[@recv_area+VirtDbgAPI::HEADER_SIZE, header.size]
+            body = @mem[self.recv_area+VirtDbgAPI::HEADER_SIZE, header.size]
             data << body
 
             sum = calc_checksum(body)
@@ -520,11 +509,6 @@ class VirtDbgImpl
                 puts "bad checksum, expected #{sum.to_s(16)}, got #{header.checksum.to_s(16)}"
                 return
             end
-        end
-
-        if header.id <= @lastid
-            puts "not a new packet"
-            return
         end
 
         case header.type
@@ -537,8 +521,10 @@ class VirtDbgImpl
             when VirtDbgAPI::READ_VIRTUAL_MEMORY_API
                 packet = ReadVirtualMemoryPacket.new
                 offset = header.length+data1.length
-                size = data1.readvirtualmemory.size
+                size = header.size-data1.length
+                puts "offset=0x#{offset.to_s(16)}, size=0x#{size.to_s(16)}"
                 data2 = data[offset, size]
+                packet.data2 = data2
 
             when VirtDbgAPI::WRITE_VIRTUAL_MEMORY_API
                 packet = WriteVirtualMemoryPacket.new
@@ -579,27 +565,38 @@ class VirtDbgImpl
 
         packet.header = header
         @lastid = header.id
+#         puts packet.to_s
+#         puts data.hexdump
 
-        ack = AckPacket.new
-        ack.header.id = header.id
-        ack.header.clientid = @clientid
-
-        @mem[@recv_area+packet_size, VirtDbgAPI::HEADER_SIZE] = ack.encode
+        @area.lastserverid = header.id
         packet
     end
 
     def breakin
         request = BreakinPacket.new
         send_packet request
+        packet = recv_packet
+        if packet and packet.kind_of? StateChangePacket
+            @state = :stopped
+        end
+        puts "breakin, got #{packet.inspect}"
+        packet
     end
 
-    def continue(status=0)
-        request = ContinuePacket.new(status)
+    def continue
+        request = ContinuePacket.new(VirtDbgAPI::CONTINUE_STATUS_CONTINUE)
         send_packet request
+        @state = :running
     end
 
     def singlestep
-        continue(status=VirtDbgAPI::CONTINUE_STATUS_SINGLE_STEP)
+        request = ContinuePacket.new(VirtDbgAPI::CONTINUE_STATUS_SINGLE_STEP)
+        send_packet request
+        packet = recv_packet
+        if packet and packet.kind_of? StateChangePacket
+            @state = :stopped
+        end
+        packet
     end
 
     def extract_context(response)
@@ -668,14 +665,19 @@ class VirtDbgImpl
     end
 
     def get_context
+        return if @state == :running
         request = GetContextPacket.new
         send_packet request
         response = recv_packet_with_type GetContextPacket
-        return unless response
-        (response.error == 0) ? extract_context(response) : nil
+        if response and response.error == 0
+            return extract_context(response)
+        else
+            return nil
+        end
     end
 
     def set_context(context)
+        return if @state == :running
         request = SetContextPacket.new
         fill_context request, context
         send_packet request
@@ -683,14 +685,19 @@ class VirtDbgImpl
     end
 
     def read_virtual_memory(address, size)
+        return if @state == :running
         request = ReadVirtualMemoryPacket.new(address, size)
         send_packet request
         response = recv_packet_with_type ReadVirtualMemoryPacket
-        return unless response
-        (response.error == 0) ? response.data2 : nil
+        if response and response.error == 0
+            return response.data2
+        else
+            return nil
+        end
     end
 
     def write_virtual_memory(address, data)
+        return if @state == :running
         request = WriteVirtualMemoryPacket.new(address, data)
         send_packet request
         response = recv_packet_with_type WriteVirtualMemoryPacket
@@ -737,70 +744,77 @@ class VirtDbg < Debugger
         @memory = VirtDbgMem.new(impl)
         @context = {}
         super()
-        @state = :running
         @info = nil
     end
 
+    def state
+        @impl.state
+    end
+
+    def state=(state)
+        @impl.state = state
+    end
+
     def get_reg_value(reg)
-        context = @impl.get_context if @context.empty?
-        return 0xdeaddead if not context 
-        @context = context
+        if @context.empty?
+            context = @impl.get_context
+            return 0xbad if not context
+            @context = context
+        end
+            
         @context[reg]
     end
 
     def set_reg_value(reg, val)
-        return if @state != :stopped
-        puts "set_reg_value #{reg} #{val}"
         @context[reg] = val
     end
 
     def invalidate
-        @impl.set_context @context if not @context.empty?
+        if not @context.empty?
+            @impl.set_context @context
+        end
+        @memory.invalidate
         @context.clear
         super()
     end
 
     def do_continue(*a)
-        puts "do_continue"
-        return if @state != :stopped
-		@state = :running
-		@info = 'continue'
+        invalidate
         @impl.continue
+        @info = nil
 	end
 
 	def do_singlestep(*a)
-        puts "do_singlestep"
-		return if @state != :stopped
-		@state = :running
-		@info = 'singlestep'
-		@impl.singlestep
+        invalidate
+        @impl.singlestep
+        @info = "singlestep"
 	end
+
+    def break
+        @impl.breakin
+    end
 
     # non blocking
 	def do_check_target
         invalidate
-        packet = @impl.recv_packet_with_type StateChangePacket
-        if packet
-            @state = :stopped
+        packet = @impl.recv_packet
+        if packet and packet.kind_of? StateChangePacket
+            @impl.state = :stopped
             @info = "got exception #{packet.exception}"
+        else
+            puts "do check, got #{packet.inspect}" if packet
         end
-        @state = :stopped
 	end
 
     # blocking 
 	def do_wait_target
-        puts "do_wait_target"
         loop do
             do_check_target
-			break if @state == :dead
+			break if @impl.state == :stopped
 		end
 	end
 
-    def break
-        puts "break"
-        @impl.breakin
-    end
-
+  
     def bpx(addr, *a)
         hwbp(addr, :x, 1, *a) 
     end
@@ -833,16 +847,19 @@ class VirtDbg < Debugger
         puts "listing processes ! soon..."
     end
 
+    def dumplog(arg=nil)
+        @impl.dumplog
+    end
+
     def ui_command_setup(ui)
         ui.new_command('idt', 'dump idt') { |arg| ui.wrap_run { dump_idt arg } }
-#         ui.keyboard_callback[:f6] = lambda { ui.wrap_run { syscall } }
-
         ui.new_command('processes', 'list processes') { |arg| ui.wrap_run { list_processes arg} } 
+        ui.new_command('dumplog', 'dump virtdbg log') { |arg| ui.wrap_run { dumplog arg} }
     end
  
 end
 
-$device = 1
+$device = 0
 $mem = init_1394($device)
 $impl = VirtDbgImpl.new($mem)
 $impl.setup

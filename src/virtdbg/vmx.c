@@ -381,7 +381,7 @@ NTSTATUS CheckIfVMXIsEnabled()
 
 NTSTATUS Virtualize(PVIRT_CPU pCpu)
 {
-    ULONG64 rsp;
+/*    ULONG64 rsp;*/
     ULONG32 i;
     
     i = KeGetCurrentProcessorNumber();

@@ -369,7 +369,7 @@ static size_t dopr (
         strvalue = va_arg (args, char *
         );
         if (max == -1) {
-          max = strlen (strvalue);
+          max = (int)strlen (strvalue);
         }
         if (min > 0 && max >= 0 && min > max)
           max = min;
@@ -400,7 +400,7 @@ static size_t dopr (
           int *num;
           num = va_arg (args, int *
           );
-          *num = currlen;
+          *num = (int)currlen;
         }
         break;
       case '%':
@@ -596,7 +596,7 @@ int vsnprintf (
   va_list args
 )
 {
-  return dopr (str, count, fmt, args);
+  return (int)dopr (str, count, fmt, args);
 }
 # endif
 
@@ -614,7 +614,7 @@ int snprintf (
   va_start (ap, fmt);
   ret = vsnprintf (str, count, fmt, ap);
   va_end (ap);
-  return ret;
+  return (int)ret;
 }
 # endif
 

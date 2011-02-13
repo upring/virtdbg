@@ -8,6 +8,7 @@ MSC_WARNING_LEVEL=/W4 /wd4201 /wd4214 /wd4100
 
 SOURCES=\
     snprintf.c \
+    log.c \
     mem.c \
     debug.c \
     protocol.c \

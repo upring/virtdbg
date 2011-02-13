@@ -1,18 +1,23 @@
 #include "protocol.h"
 
-static ULONG32 g_Id = 0;
+static LONG g_Id = 0;
+static ULONG32 g_LastId = 0;
+static ULONG32 g_ClientId = 0;
 static PVOID g_SendArea = NULL;
 static PVOID g_RecvArea = NULL;
+
+extern PVIRTDBG_CONTROL_AREA g_ControlArea;
 
 NTSTATUS InitProtocolLayer(PVOID SendArea, PVOID RecvArea)
 {
     g_SendArea = SendArea;
     g_RecvArea = RecvArea;
+    g_Id = INITIAL_ID;
     return STATUS_SUCCESS;
 }
 
 
-ULONG32 CalcChecksum(PVOID Src, ULONG32 Size)
+static ULONG32 CalcChecksum(PVOID Src, ULONG32 Size)
 {
     ULONG32 Checksum;
     ULONG32 i;
@@ -26,125 +31,132 @@ ULONG32 CalcChecksum(PVOID Src, ULONG32 Size)
     return Checksum;
 }
 
+static VOID FixUpPacket(PVOID pPacket)
+{
+    PPACKET_HEADER pHeader;
+    pHeader = (PPACKET_HEADER)pPacket;
+    pHeader->Id = g_Id;
+    pHeader->ClientId = g_ClientId;
+    pHeader->Checksum = CalcChecksum((PUCHAR)pPacket+sizeof(PACKET_HEADER), 
+                    pHeader->Size);
+}
+
 
 BOOLEAN SendPacket(PVOID pPacket, ULONG32 MaxRetries)
 {
     PPACKET_HEADER pHeader;
     ULONG32 Size, retries;
-    BOOLEAN result;
     
     retries = 0;
-
     pHeader = (PPACKET_HEADER)pPacket;
-    pHeader->Id = g_Id;
+
+    FixUpPacket(pPacket);
     Size = pHeader->Size+sizeof(PACKET_HEADER);
-    RtlCopyMemory(g_SendArea, pPacket, Size);
 
-    do
+    if (g_SendArea == NULL)
     {
-        pHeader = (PPACKET_HEADER)((PUCHAR)g_SendArea+Size);
-        if (pHeader->Type == PACKET_TYPE_RESET)
-        {
-            g_Id = INITIAL_ID;
-            DbgLog(("resetting id to 0x%x\n", g_Id));
-            continue;
-        }
+        DbgLog(("not initialized ?\n"));
+        return FALSE;
+    }
 
-        if ((pHeader->Magic == PACKET_MAGIC) && 
-                (pHeader->Type == PACKET_TYPE_ACK) && 
-                (pHeader->Id == g_Id))
-        {
-            result = TRUE;
-            DbgLog(("Sent packet (id=0x%x)\n", g_Id));
-            g_Id++;
-            break;
-        }
+    if (Size > MAX_PACKET_SIZE)
+    {
+        DbgLog(("packet too big\n"));
+        return FALSE;
+    }
 
-        retries++;
-        if (retries >= MaxRetries)
-        {
-/*            if (retries == MAX_RETRIES)*/
-/*                DbgLog(("timeout when sending packet (id=0x%x)\n", g_Id));*/
-            result = FALSE;
-            break;
-        }
-
-    } while (42);
-
+    RtlCopyMemory(g_SendArea, pPacket, Size);
     DestroyPacket(pPacket);
-    return result;
+
+    while (retries < MaxRetries)
+    {
+        retries++;
+        if (g_ControlArea->LastServerId == pHeader->Id)
+        {
+            InterlockedIncrement(&g_Id);
+            DbgLog(("packet successfully sent\n"));
+            return TRUE;
+        }
+    }
+    DbgLog(("no ack after %d retries\n", retries));
+    return FALSE;
+}
+
+VOID CheckNewClientId()
+{
+    if (g_ControlArea == NULL)
+        return;
+
+    g_ControlArea->ServerId = g_ControlArea->ClientId;
+    if (g_ControlArea->ClientId != g_ClientId)
+    {
+        DbgLog(("new client : 0x%x\n", g_ControlArea->ClientId));
+        g_ClientId = g_ControlArea->ClientId;
+        g_Id = INITIAL_ID;
+        g_LastId = 0;
+        DbgLog(("send @ 0x%llx (0x%llx) recv @ 0x%llx (0x%llx)\n", g_SendArea, g_ControlArea->RecvArea, g_RecvArea, g_ControlArea->SendArea));
+        DbgLog(("sizeof(MANIPULATE_STATE_PACKET)=0x%x\n", 
+                    sizeof(MANIPULATE_STATE_PACKET)));
+        DbgLog(("sizeof(PACKET_HEADER)=0x%x\n", 
+                    sizeof(PACKET_HEADER)));
+
+    }
 
 }
 
-PVOID ReceivePacket(ULONG32 MaxRetries)
+PVOID ReceivePacket()
 {
     PVOID pPacket;
-    PPACKET_HEADER pHeader, pAck;
-    ULONG32 HeaderSize, Size, Checksum, retries;
+    PPACKET_HEADER pHeader;
+    ULONG32 Size, Checksum;
 
-    retries = 0;
+    CheckNewClientId();
 
-    do
+    if (g_RecvArea == NULL)
     {
-        pHeader = (PPACKET_HEADER)(g_RecvArea);
-        if (pHeader->Type == PACKET_TYPE_RESET)
+        DbgLog(("not initialized ?\n"));
+        return NULL;
+    }
+
+    pHeader = (PPACKET_HEADER)(g_RecvArea);
+    if (pHeader->Magic != PACKET_MAGIC)
+        return NULL;
+
+    if (pHeader->Size > MAX_PACKET_SIZE)
+        return NULL;
+
+    if (pHeader->Id <= g_LastId)
+        return NULL;
+
+    Size = sizeof(PACKET_HEADER) + pHeader->Size;
+    pPacket = AllocateMemory(Size);
+    if (pPacket == NULL)
+    {
+        return NULL;
+    }
+            
+    RtlCopyMemory(pPacket, g_RecvArea, Size);
+
+    if (pHeader->Size > 0)
+    {
+        Checksum = CalcChecksum((PUCHAR)pPacket+sizeof(PACKET_HEADER), 
+                pHeader->Size);
+        if (Checksum != pHeader->Checksum)
         {
-            if (g_Id != INITIAL_ID)
-            {
-                DbgLog(("resetting id to 0x%x\n", INITIAL_ID));
-                g_Id = INITIAL_ID;
-            }
-            continue;
-        }
-
-        if (pHeader->Id == g_Id)
-        {
-            HeaderSize = pHeader->Size;
-            if (HeaderSize <= MAX_PACKET_SIZE)
-            {
-                Size = sizeof(PACKET_HEADER) + HeaderSize;
-                pPacket = AllocateMemory(Size);
-                if (pPacket == NULL)
-                {
-                    return NULL;
-                }
-                
-                RtlCopyMemory(pPacket, g_RecvArea, Size);
-
-                if (HeaderSize > 0)
-                {
-                    Checksum = CalcChecksum((PUCHAR)pPacket+sizeof(PACKET_HEADER), HeaderSize);
-                    if (Checksum != pHeader->Checksum)
-                    {
-                        UnAllocateMemory(pPacket);
-                        return NULL;
-                    }
-                }
-
-                pAck = (PPACKET_HEADER)((PUCHAR)(g_RecvArea)+Size);
-                pAck->Magic = PACKET_MAGIC;
-                pAck->Type = PACKET_TYPE_ACK;
-                pAck->Id = g_Id;
-
-                DbgLog(("Received packet (id=0x%x)\n", g_Id));
-                g_Id++;
-
-                return pPacket;
-            }
-        }
-        retries++;
-        if (retries >= MaxRetries)
-        {
-/*            if (retries >= MAX_RETRIES)*/
-/*                DbgLog(("timeout when receiving packet (id=0x%x) (retries=0x%x)\n", g_Id, retries));*/
+            UnAllocateMemory(pPacket);
             return NULL;
         }
+    }
 
-    } while (42);
+    g_LastId = pHeader->Id;
+    g_ControlArea->LastClientId = g_LastId;
+    DbgLog(("Received packet (id=0x%x)\n", g_LastId));
+    return pPacket;
+
 }
 
 
-PVOID CreateBreakinPacket()
+static PVOID CreateBreakinPacket()
 {
     PVOID pPacket;
     PPACKET_HEADER pHeader;

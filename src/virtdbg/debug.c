@@ -1,9 +1,10 @@
 #include "debug.h"
 
-static ULONG32 g_Id;
-static PKSPIN_LOCK g_FreezeLock;
-static ULONG32 g_pagefaults = 0;
+extern LONG g_Initialized;
+extern PVIRTDBG_CONTROL_AREA g_ControlArea;
 
+static PKSPIN_LOCK g_FreezeLock = NULL;
+static LONG g_pagefaults = 0;
 
 
 NTSTATUS InitDebugLayer()
@@ -25,7 +26,7 @@ NTSTATUS InitDebugLayer()
 /*}*/
 
 
-BOOLEAN HandleVmInstruction(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
+static BOOLEAN HandleVmInstruction(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
 {
     ULONG64 InstructionLength, Rip;
     
@@ -41,7 +42,7 @@ BOOLEAN HandleVmInstruction(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
     return TRUE;
 }
 
-BOOLEAN HandleVmCall(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
+static BOOLEAN HandleVmCall(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
 {
     ULONG64 InstructionLength, Rip, Rsp;
 
@@ -68,7 +69,7 @@ BOOLEAN HandleVmCall(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
 }
 
 
-BOOLEAN HandleUnimplemented(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs, ULONG64 ExitCode)
+static BOOLEAN HandleUnimplemented(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs, ULONG64 ExitCode)
 {
     ULONG64 InstructionLength;
 
@@ -82,7 +83,7 @@ BOOLEAN HandleUnimplemented(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs, ULONG64 Exit
     return TRUE;
 }
 
-BOOLEAN InjectInt1(ULONG64 Rip)
+static BOOLEAN InjectInt1(ULONG64 Rip)
 {
     ULONG32 InjectEvent;
     PINTERRUPT_INJECT_INFO_FIELD pInjectEvent;
@@ -101,7 +102,7 @@ BOOLEAN InjectInt1(ULONG64 Rip)
 }
 
 
-BOOLEAN HandleCpuid(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
+static BOOLEAN HandleCpuid(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
 {
     ULONG32 Function, eax, ebx, ecx, edx;
     ULONG64 InstructionLength;
@@ -123,7 +124,7 @@ BOOLEAN HandleCpuid(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
     return TRUE;
 }
 
-BOOLEAN HandleMsrRead(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
+static BOOLEAN HandleMsrRead(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
 {
     LARGE_INTEGER Msr;
     ULONG32 ecx;
@@ -169,7 +170,7 @@ BOOLEAN HandleMsrRead(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
     return TRUE;
 }
 
-BOOLEAN HandleMsrWrite(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
+static BOOLEAN HandleMsrWrite(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
 {
     LARGE_INTEGER Msr;
     ULONG32 ecx;
@@ -215,14 +216,14 @@ BOOLEAN HandleMsrWrite(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
 }
 
 
-BOOLEAN HandleDrAccess(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
+static BOOLEAN HandleDrAccess(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
 {
     DbgLog(("DrAccess\n"));
     return TRUE;
 }
 
 
-BOOLEAN HandleCrAccess(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
+static BOOLEAN HandleCrAccess(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
 {
     PMOV_CR_QUALIFICATION pExitQualification;
     ULONG64 Exit;
@@ -248,6 +249,7 @@ BOOLEAN HandleCrAccess(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
             break;
 
         default:
+            Cr = 0;
             _Int3();
             break;
     }
@@ -319,6 +321,7 @@ BOOLEAN HandleCrAccess(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
             break;
 
         default:
+            Reg = 0;
             _Int3();
             break;
 
@@ -334,15 +337,8 @@ BOOLEAN HandleCrAccess(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
                     break;
 
                 case CR3:
-                    if (pCpu->ProcessorNumber == 0)
-                    {
-/*                        EnterDebugger(pCpu, pGuestRegs, Reg);*/
-                        _WriteVMCS(GUEST_CR3, Reg);
-                    }
-                    else
-                    {
-                        _WriteVMCS(GUEST_CR3, Reg);
-                    }
+                    HandleClientRequest(pCpu, pGuestRegs, Reg);
+                    _WriteVMCS(GUEST_CR3, Reg);
                     break;
 
                 case CR4:
@@ -440,7 +436,7 @@ BOOLEAN HandleCrAccess(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
     return TRUE;
 }
 
-BOOLEAN HandleException(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
+static BOOLEAN HandleException(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
 {
     ULONG32 Event, InjectEvent;
     ULONG64 ErrorCode, ExitQualification, GuestRip;
@@ -478,7 +474,7 @@ BOOLEAN HandleException(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
                     DbgLog(("vmx: int1 guest_rip = 0x%llx\n", 
                         GuestRip));
 
-/*                    ReportException(pCpu, pGuestRegs, pEvent->Vector, GuestRip);*/
+                    ReportException(pCpu, pGuestRegs, pEvent->Vector, GuestRip);
 /*                    {*/
 /*                        DbgLog(("invalid state\n"));*/
 /*                        InjectEvent = 0;*/
@@ -535,11 +531,6 @@ BOOLEAN HandleException(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
                     DbgLog(("vmx: Exception(): guest_rip = 0x%llx\n", 
                         GuestRip));
 
-/*                    pBreakpoint = GetBreakpointWithAddress(GuestRip,*/
-/*                            SOFTWARE_BREAKPOINT_TYPE); */
-
-/*                    if (pBreakpoint == NULL)*/
-/*                    {*/
                     InjectEvent = 0;
                     pInjectEvent->Vector = BREAKPOINT_EXCEPTION;
                     pInjectEvent->InterruptionType = SOFTWARE_INTERRUPT;
@@ -548,11 +539,6 @@ BOOLEAN HandleException(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
                     _WriteVMCS(VM_ENTRY_INTR_INFO_FIELD, InjectEvent);
                     _WriteVMCS(VM_ENTRY_INSTRUCTION_LEN, 1);
                     _WriteVMCS(GUEST_RIP, GuestRip);
-/*                    }*/
-/*                    else*/
-/*                    {*/
-/*                        ReportEvent(pBreakpoint);*/
-/*                    }*/
                     break;
 
                 case OVERFLOW_EXCEPTION:
@@ -572,7 +558,7 @@ BOOLEAN HandleException(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
     return TRUE;
 }
 
-BOOLEAN HandleInvd(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
+static BOOLEAN HandleInvd(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
 {
     ULONG64 InstructionLength;
 
@@ -686,8 +672,8 @@ VOID HandleVmExit(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
             break;
 
         case EXIT_REASON_DR_ACCESS:
-            HandleDrAccess(pCpu, pGuestRegs);
-/*            HandleUnimplemented(pCpu, pGuestRegs, ExitCode);*/
+/*            HandleDrAccess(pCpu, pGuestRegs);*/
+            HandleUnimplemented(pCpu, pGuestRegs, ExitCode);
             break;
 
         case EXIT_REASON_IO_INSTRUCTION:     
@@ -743,7 +729,7 @@ VOID HandleVmExit(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
 
 }
 
-VOID EnableTF()
+static VOID EnableTF()
 {
     ULONG64 Rflags;
     Rflags = _ReadVMCS(GUEST_RFLAGS);
@@ -753,7 +739,7 @@ VOID EnableTF()
 
 }
 
-VOID DisableTF()
+static VOID DisableTF()
 {
     ULONG64 Rflags;
     Rflags = _ReadVMCS(GUEST_RFLAGS);
@@ -763,12 +749,12 @@ VOID DisableTF()
 
 }
 
-PVOID ReadVirtualMemory(ULONG64 Address, ULONG32 Size)
+static PVOID ReadVirtualMemory(ULONG64 Address, ULONG32 Size)
 {
     NTSTATUS Status;
     PVOID Buffer;
     
-    if (Size > 0x280)
+    if (Size > 0x800)
         return NULL;
 
     Status = IsPagePresent(Address); 
@@ -784,7 +770,7 @@ PVOID ReadVirtualMemory(ULONG64 Address, ULONG32 Size)
     return Buffer;
 }
 
-VOID DumpContext(PDEBUG_CONTEXT pContext)
+static VOID DumpContext(PDEBUG_CONTEXT pContext)
 {
     DbgLog(("rax = 0x%llx\n", pContext->rax));
     DbgLog(("rbx = 0x%llx\n", pContext->rbx));
@@ -816,7 +802,7 @@ VOID DumpContext(PDEBUG_CONTEXT pContext)
     DbgLog(("dr7 = 0x%llx\n", pContext->dr7));
 }
 
-VOID DumpMem(PUCHAR Address, ULONG32 Size)
+static VOID DumpMem(PUCHAR Address, ULONG32 Size)
 {
     ULONG64 i;
     for (i=0;i<Size;i++)
@@ -826,14 +812,226 @@ VOID DumpMem(PUCHAR Address, ULONG32 Size)
 }
 
 
-BOOLEAN HandleManipulateStatePacket(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs, PVOID pPacket)
+
+static PVOID HandleReadVirtualMemoryPacket(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs, PVOID pPacket)
 {
-    PPACKET_HEADER pHeader, pResponseHeader;
     PMANIPULATE_STATE_PACKET pData1, pResponseData1;
     PVOID pResponse, pData;
-    PDEBUG_CONTEXT pContext;
     ULONG64 Address;
-    ULONG32 Size, Flags, Offset;
+    ULONG32 Size, Offset;
+
+    pData1 = (PMANIPULATE_STATE_PACKET)((PUCHAR)pPacket+sizeof(PACKET_HEADER));
+
+    Address = pData1->u.ReadVirtualMemory.Address;
+    Size = pData1->u.ReadVirtualMemory.Size;
+
+    DbgLog(("READ_VIRTUAL_MEMORY_API address=0x%llx, size=0x%x\n", Address, Size));
+
+    pData = ReadVirtualMemory(Address, Size);
+    if (pData == NULL)
+    {
+        pResponse = CreateManipulateStatePacket(READ_VIRTUAL_MEMORY_API, 0);
+        if (pResponse == NULL)
+        {
+            /* not enought memory ? */
+            return NULL;
+        }
+
+        pResponseData1 = (PMANIPULATE_STATE_PACKET)((PUCHAR)pResponse+
+                sizeof(PACKET_HEADER));
+        pResponseData1->Error = (ULONG32)STATUS_UNSUCCESSFUL;
+
+    }
+    else
+    {
+        pResponse = CreateManipulateStatePacket(READ_VIRTUAL_MEMORY_API, Size);
+        if (pResponse == NULL)
+        {
+            /* not enought memory ? */
+            return NULL;
+        }
+    
+        Offset = sizeof(PACKET_HEADER)+sizeof(MANIPULATE_STATE_PACKET);
+/*        DbgLog(("offset=0x%08x\n", Offset));*/
+/*        DumpMem(pData, Size);*/
+        RtlCopyMemory((PUCHAR)pResponse+Offset, pData, Size);
+        UnAllocateMemory(pData);
+
+    }
+    return pResponse;
+
+}
+
+static PVOID HandleWriteVirtualMemoryPacket(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs, PVOID pPacket)
+{
+    PMANIPULATE_STATE_PACKET pData1, pResponseData1;
+    PVOID pResponse;
+    ULONG64 Address;
+    ULONG32 Size;
+
+    pData1 = (PMANIPULATE_STATE_PACKET)((PUCHAR)pPacket+sizeof(PACKET_HEADER));
+
+    Address = pData1->u.WriteVirtualMemory.Address;
+    Size = pData1->u.WriteVirtualMemory.Size;
+
+    DbgLog(("WRITE_VIRTUAL_MEMORY_API address=0x%llx, size=0x%x\n", Address, Size));
+
+    pResponse = CreateManipulateStatePacket(WRITE_VIRTUAL_MEMORY_API, 0);
+    if (pResponse == NULL)
+    {
+        /* not enought memory ? */
+        return NULL;
+    }
+
+    pResponseData1 = (PMANIPULATE_STATE_PACKET)((PUCHAR)pResponse+
+            sizeof(PACKET_HEADER));
+    pResponseData1->Error = (ULONG32)STATUS_UNSUCCESSFUL;
+    return pResponse;
+}
+
+
+/*    if (Size == pHeader->Size-sizeof(MANIPULATE_STATE_PACKET))*/
+/*    {*/
+/*        pData = AllocateMemory(Size);*/
+/*        if (pData == NULL)*/
+/*        {*/
+/*             not enought memory */
+/*            return NULL;*/
+/*        }*/
+
+/*        RtlCopyMemory(pData, (PUCHAR)pData1+sizeof(MANIPULATE_STATE_PACKET), Size);*/
+/*        UnAllocateMemory(pData);*/
+/*        */
+/*        pResponse = CreateManipulateStatePacket(WRITE_VIRTUAL_MEMORY_API, 0);*/
+/*        if (pResponse == NULL)*/
+/*        {*/
+/*             not enought memory */
+/*            return NULL;*/
+/*        }*/
+
+/*        pResponseHeader = (PPACKET_HEADER)pResponse;*/
+/*        pResponseHeader->Id = g_Id;*/
+/*        pResponseHeader->Checksum = CalcChecksum((PUCHAR)pResponse+sizeof(PACKET_HEADER),*/
+/*                pResponseHeader->Size);*/
+/*        SendPacket(pResponse, MAX_RETRIES);*/
+/*    }*/
+
+static PVOID HandleGetContextPacket(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs, PVOID pPacket)
+{
+    PMANIPULATE_STATE_PACKET pData1;
+    PVOID pResponse;
+    PDEBUG_CONTEXT pContext;
+    ULONG32 Flags;
+
+    pData1 = (PMANIPULATE_STATE_PACKET)((PUCHAR)pPacket+sizeof(PACKET_HEADER));
+
+    DbgLog(("received GET_CONTEXT_API request\n"));
+    Flags = pData1->u.GetContext.Flags;
+
+    pResponse = CreateManipulateStatePacket(GET_CONTEXT_API, sizeof(DEBUG_CONTEXT));
+ 
+    if (pResponse == NULL)
+    {
+        /* not enought memory ? */
+        return NULL;
+    }
+   
+    pContext = (PDEBUG_CONTEXT)((PUCHAR)pResponse+sizeof(PACKET_HEADER)+
+            sizeof(MANIPULATE_STATE_PACKET));
+
+    pContext->rax = pGuestRegs->rax;
+    pContext->rbx = pGuestRegs->rbx;
+    pContext->rcx = pGuestRegs->rcx;
+    pContext->rdx = pGuestRegs->rdx;
+    pContext->rsi = pGuestRegs->rsi;
+    pContext->rdi = pGuestRegs->rdi;
+    pContext->rbp = pGuestRegs->rbp;
+    pContext->rsp = pGuestRegs->rsp;
+    pContext->r8 = pGuestRegs->r8;
+    pContext->r9 = pGuestRegs->r9;
+    pContext->r10 = pGuestRegs->r10;
+    pContext->r11 = pGuestRegs->r11;
+    pContext->r12 = pGuestRegs->r12;
+    pContext->r13 = pGuestRegs->r13;
+    pContext->r14 = pGuestRegs->r14;
+    pContext->r15 = pGuestRegs->r15;
+    pContext->rflags = _ReadVMCS(GUEST_RFLAGS);
+    pContext->rip = _ReadVMCS(GUEST_RIP);
+    pContext->cr0 = _ReadVMCS(GUEST_CR0);
+    pContext->cr3 = _ReadVMCS(GUEST_CR3);
+    pContext->cr4 = _ReadVMCS(GUEST_CR4);
+    pContext->dr0 = _Dr0();
+    pContext->dr1 = _Dr1();
+    pContext->dr2 = _Dr2();
+    pContext->dr3 = _Dr3();
+    pContext->dr6 = _Dr6();
+    pContext->dr7 = _ReadVMCS(GUEST_DR7);
+    pContext->cs = _Cs();
+    pContext->ds = _Ds();
+    pContext->es = _Es();
+    pContext->fs = _Fs();
+    pContext->ss = _Ss();
+    pContext->gs = _Gs();
+
+/*    DumpContext(pContext);*/
+    return pResponse;
+}
+
+static PVOID HandleSetContextPacket(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs, PVOID pPacket)
+{
+    PMANIPULATE_STATE_PACKET pData1;
+    PVOID pResponse;
+    PDEBUG_CONTEXT pContext;
+    ULONG32 Flags;
+
+    pData1 = (PMANIPULATE_STATE_PACKET)((PUCHAR)pPacket+sizeof(PACKET_HEADER));
+
+    DbgLog(("received SET_CONTEXT_API request\n"));
+    Flags = pData1->u.SetContext.Flags;
+
+    pContext = (PDEBUG_CONTEXT)((PUCHAR)pData1+sizeof(MANIPULATE_STATE_PACKET));
+
+    DumpContext(pContext);
+
+    pGuestRegs->rax = pContext->rax;
+    pGuestRegs->rbx = pContext->rbx;
+    pGuestRegs->rcx = pContext->rcx;
+    pGuestRegs->rdx = pContext->rdx;
+    pGuestRegs->rsi = pContext->rsi;
+    pGuestRegs->rdi = pContext->rdi;
+    pGuestRegs->rbp = pContext->rbp;
+    pGuestRegs->rsp = pContext->rsp;
+    pGuestRegs->r8 = pContext->r8;
+    pGuestRegs->r9 = pContext->r9;
+    pGuestRegs->r10 = pContext->r10;
+    pGuestRegs->r11 = pContext->r11;
+    pGuestRegs->r12 = pContext->r12;
+    pGuestRegs->r13 = pContext->r13;
+    pGuestRegs->r14 = pContext->r14;
+    pGuestRegs->r15 = pContext->r15;
+    _WriteVMCS(GUEST_RFLAGS, pContext->rflags);
+    _WriteVMCS(GUEST_RIP, pContext->rip);
+    _SetDr0(pContext->dr0);
+    _SetDr1(pContext->dr1);
+    _SetDr2(pContext->dr2);
+    _SetDr3(pContext->dr3);
+    _WriteVMCS(GUEST_DR7, pContext->dr7);
+
+    pResponse = CreateManipulateStatePacket(SET_CONTEXT_API, 0);
+    if (pResponse == NULL)
+    {
+        /* not enought memory ? */
+        return NULL;
+    }
+    return pResponse; 
+}
+
+static BOOLEAN HandleManipulateStatePacket(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs, PVOID pPacket)
+{
+    PPACKET_HEADER pHeader;
+    PMANIPULATE_STATE_PACKET pData1;
+    PVOID pResponse;
+    BOOLEAN bRes;
 
     pHeader = (PPACKET_HEADER)pPacket;
     pData1 = (PMANIPULATE_STATE_PACKET)((PUCHAR)pPacket+sizeof(PACKET_HEADER));
@@ -841,254 +1039,108 @@ BOOLEAN HandleManipulateStatePacket(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs, PVOI
     switch (pData1->ApiNumber)
     {
         case READ_VIRTUAL_MEMORY_API:
-            Address = pData1->u.ReadVirtualMemory.Address;
-            Size = pData1->u.ReadVirtualMemory.Size;
-
-            DbgLog(("READ_VIRTUAL_MEMORY_API request, address=0x%llx, size=0x%x\n", Address, Size));
-
-            pData = ReadVirtualMemory(Address, Size);
-
-            if (pData == NULL)
-            {
-                pResponse = CreateManipulateStatePacket(READ_VIRTUAL_MEMORY_API, 0);
-                if (pResponse == NULL)
-                {
-                    /* not enought memory ? */
-                    return FALSE;
-                }
-
-                pResponseData1 = (PMANIPULATE_STATE_PACKET)((PUCHAR)pResponse+
-                        sizeof(PACKET_HEADER));
-                pResponseData1->Error = STATUS_UNSUCCESSFUL;
-
-            }
-            else
-            {
-                pResponse = CreateManipulateStatePacket(READ_VIRTUAL_MEMORY_API, Size);
-                if (pResponse == NULL)
-                {
-                    /* not enought memory ? */
-                    return FALSE;
-                }
-            
-                Offset = sizeof(PACKET_HEADER)+sizeof(MANIPULATE_STATE_PACKET);
-                DbgLog(("offset=0x%08x\n", Offset));
-                RtlCopyMemory((PUCHAR)pResponse+Offset, pData, Size);
-                UnAllocateMemory(pData);
-
-            }
-
-            pResponseHeader = (PPACKET_HEADER)pResponse;
-            pResponseHeader->Id = g_Id;
-            pResponseHeader->Checksum = CalcChecksum((PUCHAR)pResponse+sizeof(PACKET_HEADER), 
-                    pResponseHeader->Size);
-            SendPacket(pResponse, MAX_RETRIES);
+            pResponse = HandleReadVirtualMemoryPacket(pCpu, pGuestRegs, pPacket);
+            if (pResponse == NULL)
+                return FALSE;
+            bRes = SendPacket(pResponse, MAX_RETRIES);
             break;
 
         case WRITE_VIRTUAL_MEMORY_API:
-            Address = pData1->u.WriteVirtualMemory.Address;
-            Size = pData1->u.WriteVirtualMemory.Size;
-
-            if (Size == pHeader->Size-sizeof(MANIPULATE_STATE_PACKET))
-            {
-                pData = AllocateMemory(Size);
-                if (pData == NULL)
-                {
-                    /* not enought memory */
-                    return FALSE;
-                }
-
-                RtlCopyMemory(pData, (PUCHAR)pData1+sizeof(MANIPULATE_STATE_PACKET), Size);
-                UnAllocateMemory(pData);
-                
-                pResponse = CreateManipulateStatePacket(WRITE_VIRTUAL_MEMORY_API, 0);
-                if (pResponse == NULL)
-                {
-                    /* not enought memory */
-                    return FALSE;
-                }
-
-                pResponseHeader = (PPACKET_HEADER)pResponse;
-                pResponseHeader->Id = g_Id;
-                pResponseHeader->Checksum = CalcChecksum((PUCHAR)pResponse+sizeof(PACKET_HEADER),
-                        pResponseHeader->Size);
-                SendPacket(pResponse, MAX_RETRIES);
-            }
+            pResponse = HandleWriteVirtualMemoryPacket(pCpu, pGuestRegs, pPacket);
+            if (pResponse == NULL)
+                return FALSE;
+            bRes = SendPacket(pResponse, MAX_RETRIES);
             break;
 
         case GET_CONTEXT_API:
-            DbgLog(("received GET_CONTEXT_API request\n"));
-            Flags = pData1->u.GetContext.Flags;
-
-            pResponse = CreateManipulateStatePacket(GET_CONTEXT_API, sizeof(DEBUG_CONTEXT));
-            
-            DbgLog(("sizeof(PACKET_HEADER) = 0x%x\n", sizeof(PACKET_HEADER)));
-            DbgLog(("sizeof(MANIPULATE_STATE_PACKET) = 0x%x\n", sizeof(MANIPULATE_STATE_PACKET)));
-            DbgLog(("sizeof(DEBUG_CONTEXT) = 0x%x\n", sizeof(DEBUG_CONTEXT)));
-
-            pContext = (PDEBUG_CONTEXT)((PUCHAR)pResponse+sizeof(PACKET_HEADER)+
-                    sizeof(MANIPULATE_STATE_PACKET));
-
-            pContext->rax = pGuestRegs->rax;
-            pContext->rbx = pGuestRegs->rbx;
-            pContext->rcx = pGuestRegs->rcx;
-            pContext->rdx = pGuestRegs->rdx;
-            pContext->rsi = pGuestRegs->rsi;
-            pContext->rdi = pGuestRegs->rdi;
-            pContext->rbp = pGuestRegs->rbp;
-            pContext->rsp = pGuestRegs->rsp;
-            pContext->r8 = pGuestRegs->r8;
-            pContext->r9 = pGuestRegs->r9;
-            pContext->r10 = pGuestRegs->r10;
-            pContext->r11 = pGuestRegs->r11;
-            pContext->r12 = pGuestRegs->r12;
-            pContext->r13 = pGuestRegs->r13;
-            pContext->r14 = pGuestRegs->r14;
-            pContext->r15 = pGuestRegs->r15;
-            pContext->rflags = _ReadVMCS(GUEST_RFLAGS);
-            pContext->rip = _ReadVMCS(GUEST_RIP);
-            pContext->cr0 = _ReadVMCS(GUEST_CR0);
-            pContext->cr3 = _ReadVMCS(GUEST_CR3);
-            pContext->cr4 = _ReadVMCS(GUEST_CR4);
-            pContext->dr0 = _Dr0();
-            pContext->dr1 = _Dr1();
-            pContext->dr2 = _Dr2();
-            pContext->dr3 = _Dr3();
-            pContext->dr6 = _Dr6();
-            pContext->dr7 = _ReadVMCS(GUEST_DR7);
-            pContext->cs = _Cs();
-            pContext->ds = _Ds();
-            pContext->es = _Es();
-            pContext->fs = _Fs();
-            pContext->ss = _Ss();
-            pContext->gs = _Gs();
-
-            DumpContext(pContext);
-
-            pResponseHeader = (PPACKET_HEADER)pResponse;
-            pResponseHeader->Id = g_Id;
-            pResponseHeader->Checksum = CalcChecksum((PUCHAR)pResponse+sizeof(PACKET_HEADER),
-                    pResponseHeader->Size);
-            SendPacket(pResponse, MAX_RETRIES);
-
+            pResponse = HandleGetContextPacket(pCpu, pGuestRegs, pPacket);
+            if (pResponse == NULL)
+                return FALSE;
+            bRes = SendPacket(pResponse, MAX_RETRIES);
             break;
 
         case SET_CONTEXT_API:
-            DbgLog(("received SET_CONTEXT_API request\n"));
-            Flags = pData1->u.SetContext.Flags;
+            pResponse = HandleSetContextPacket(pCpu, pGuestRegs, pPacket);
+            if (pResponse == NULL)
+                return FALSE;
+            bRes = SendPacket(pResponse, MAX_RETRIES);
+            break;
 
-            pContext = (PDEBUG_CONTEXT)((PUCHAR)pData1+sizeof(MANIPULATE_STATE_PACKET));
-
-            DumpContext(pContext);
-
-            pGuestRegs->rax = pContext->rax;
-            pGuestRegs->rbx = pContext->rbx;
-            pGuestRegs->rcx = pContext->rcx;
-            pGuestRegs->rdx = pContext->rdx;
-            pGuestRegs->rsi = pContext->rsi;
-            pGuestRegs->rdi = pContext->rdi;
-            pGuestRegs->rbp = pContext->rbp;
-            pGuestRegs->rsp = pContext->rsp;
-            pGuestRegs->r8 = pContext->r8;
-            pGuestRegs->r9 = pContext->r9;
-            pGuestRegs->r10 = pContext->r10;
-            pGuestRegs->r11 = pContext->r11;
-            pGuestRegs->r12 = pContext->r12;
-            pGuestRegs->r13 = pContext->r13;
-            pGuestRegs->r14 = pContext->r14;
-            pGuestRegs->r15 = pContext->r15;
-            _WriteVMCS(GUEST_RFLAGS, pContext->rflags);
-            _WriteVMCS(GUEST_RIP, pContext->rip);
-            _SetDr0(pContext->dr0);
-            _SetDr1(pContext->dr1);
-            _SetDr2(pContext->dr2);
-            _SetDr3(pContext->dr3);
-            _WriteVMCS(GUEST_DR7, pContext->dr7);
-
-            pResponse = CreateManipulateStatePacket(SET_CONTEXT_API, 0);
-            pResponseHeader = (PPACKET_HEADER)pResponse;
-            pResponseHeader->Id = g_Id;
-            pResponseHeader->Checksum = CalcChecksum((PUCHAR)pResponse+sizeof(PACKET_HEADER),
-                    pResponseHeader->Size);
-            SendPacket(pResponse, MAX_RETRIES);
-
+        default:
+            bRes = FALSE;
             break;
 
     }
 
-    return TRUE;
+    return bRes;
 }
 
 
-VOID DebugLoop(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
+static VOID DebugLoop(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs)
 {
+    PVOID pPacket;
     PPACKET_HEADER pHeader;
-    PCONTINUE_PACKET pContinue;
-    ULONG64 Rip, Rsp;
-    BOOLEAN DoDebug;
+    BOOLEAN bRes, bInDebug;
+    ULONG32 i;
 
-    DoDebug = TRUE;
     DbgLog(("Starting debugging loop...\n"));
 
-    pCpu->State = STATE_DEBUGGED;
+    bInDebug = TRUE;
 
-    do 
+    while (bInDebug)
     {
-        pHeader = (PPACKET_HEADER)ReceivePacket(MAX_RETRIES);
-        if (pHeader == NULL)
+        bRes = FALSE;
+        pPacket = ReceivePacket();
+        if (pPacket == NULL)
         {
+            for(i=0;i<100;i++);
             continue;
         }
+        
+        pHeader = (PPACKET_HEADER)pPacket;
 
         switch (pHeader->Type)
         {
             case PACKET_TYPE_CONTINUE:
-                pContinue = (PCONTINUE_PACKET)((PUCHAR)pHeader+sizeof(PACKET_HEADER));
-                if (pContinue->Status == CONTINUE_STATUS_SINGLE_STEP)
+                bRes = HandleContinuePacket(pCpu, pGuestRegs, pPacket);
+                if (bRes)
                 {
-                    EnableTF();
+                    bInDebug = FALSE;
                 }
-                else if (pContinue->Status  == CONTINUE_STATUS_UNLOAD)
-                {
-                    /* FIXME: unloading both cores */
-                    DbgLog(("Terminating...\n"));
-                    Rip = (ULONG64)_GuestExit;
-                    Rsp = pGuestRegs->rsp;
-                    DbgLog(("restoring rip=0x%llx, rsp=0x%llx\n", Rip, Rsp));
-/*                    _VmxOff(Rip, Rsp);*/
-                }
-                DoDebug = FALSE;
                 break;
 
             case PACKET_TYPE_MANIPULATE_STATE:
-                HandleManipulateStatePacket(pCpu, pGuestRegs, (PVOID)pHeader);
+                bRes = HandleManipulateStatePacket(pCpu, pGuestRegs, pPacket);
+                break;
+
+            default:
+                bRes = FALSE;
                 break;
 
         }
-        DestroyPacket(pHeader);
+        DestroyPacket(pPacket);
 
-    } while (DoDebug);
+    }
 
     DbgLog(("Ending debugging loop\n"));
-    pCpu->State = STATE_RUNNING;
 }
 
-VOID ReportException(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs, ULONG Exception, ULONG64 Address)
+static VOID ReportException(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs, ULONG Exception, ULONG64 Address)
 {
     PPACKET_HEADER pResponse;
 
     DbgLog(("reporting exception\n"));
-    DbgLog(("GUEST_ACTIVITY_STATE=0x%08x\n", _ReadVMCS(GUEST_ACTIVITY_STATE)));
+/*    DbgLog(("GUEST_ACTIVITY_STATE=0x%08x\n", _ReadVMCS(GUEST_ACTIVITY_STATE)));*/
 /*    DbgLog(("GUEST_INTERRUPTIBILITY_STATE=0x%08x\n", _ReadVMCS(GUEST_INTERRUPTIBILITY_STATE)));*/
-    DbgLog(("pending=0x%016x\n", _ReadVMCS(GUEST_PENDING_DBG_EXCEPTIONS)));
+/*    DbgLog(("pending=0x%016x\n", _ReadVMCS(GUEST_PENDING_DBG_EXCEPTIONS)));*/
             
 
-    if (pCpu->State == STATE_BREAKIN)
+    if (g_ControlArea->State == STATE_BREAKIN)
     {
         DbgLog(("Breakin, disabling TF\n"));
+        InterlockedExchange(&(g_ControlArea->State), 0);
+        DisableTF();
     }
-    
-    DisableTF();
 
     FreezeCpus(pCpu->ProcessorNumber);
 
@@ -1096,47 +1148,36 @@ VOID ReportException(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs, ULONG Exception, UL
 
     if (pResponse == NULL)
     {
-        /* bad ! */
+/*         bad ! */
         return;
     }
 
-    pResponse->Id = g_Id;
-    pResponse->Checksum = CalcChecksum((PUCHAR)pResponse+sizeof(PACKET_HEADER), 
-                    pResponse->Size);
-
-    if (SendPacket(pResponse, MAX_RETRIES))
-    {
-        DebugLoop(pCpu, pGuestRegs);
-    }
-    else
-    {
-        DbgLog(("error when sending packet\n"));
-    }
+    SendPacket(pResponse, MAX_RETRIES);
+    DebugLoop(pCpu, pGuestRegs);
 
     ResumeCpus(pCpu->ProcessorNumber);
 
-    DbgLog(("exception end\n"));
+    DbgLog(("end reporting exception\n"));
 }
 
-static VOID FreezeCpu(PKDPC pDpc, PVOID DeferredContext, PVOID SystemArgument1, PVOID SystemArgument2)
+static VOID FreezeCpuRoutine(PKDPC pDpc, PVOID DeferredContext, PVOID SystemArgument1, PVOID SystemArgument2)
 {
-/*    KIRQL OldIrql;*/
-    
+    KIRQL OldIrql;
     DbgLog(("cpu frozen\n"));
 
-/*    KeRaiseIrql(HIGH_LEVEL, &OldIrql);*/
+    KeRaiseIrql(HIGH_LEVEL, &OldIrql);
     KeAcquireSpinLockAtDpcLevel(g_FreezeLock);
     KeReleaseSpinLockFromDpcLevel(g_FreezeLock);
-/*    KeLowerIrql(OldIrql);*/
+    KeLowerIrql(OldIrql);
 
     UnAllocateMemory(pDpc);
     DbgLog(("cpu resumed\n"));
 
 }
 
-VOID FreezeCpus(ULONG32 RunningProcessor)
+static VOID FreezeCpus(ULONG32 RunningProcessor)
 {
-    CCHAR i;
+    UCHAR i;
     PKDPC pDpc;
  
     KeAcquireSpinLockAtDpcLevel(g_FreezeLock);
@@ -1154,8 +1195,8 @@ VOID FreezeCpus(ULONG32 RunningProcessor)
                 return;
             }
 
-            KeInitializeDpc(pDpc, FreezeCpu, NULL);
-            KeSetTargetProcessorDpc(pDpc, i); 
+            KeInitializeDpc(pDpc, FreezeCpuRoutine, NULL);
+            KeSetTargetProcessorDpc(pDpc, (CCHAR)i); 
             KeSetImportanceDpc(pDpc, HighImportance);
             KeInsertQueueDpc(pDpc, NULL, NULL);
 
@@ -1163,107 +1204,13 @@ VOID FreezeCpus(ULONG32 RunningProcessor)
     }
 }
     
-VOID ResumeCpus(ULONG32 RunningProcessor)
+static VOID ResumeCpus(ULONG32 RunningProcessor)
 {
     DbgLog(("Resuming cpus...\n"));
     KeReleaseSpinLockFromDpcLevel(g_FreezeLock);
 }
 
-/*VOID FreezeCpus(ULONG32 RunningProcessor)*/
-/*{*/
-/*    int i, result, count;*/
-/*    KIRQL OldIrql;*/
-
-/*    KeRaiseIrql(HIGH_LEVEL, &OldIrql);*/
-/*    DbgLog(("Freezing cpus...\n"));*/
-/*    for (i=0; i<KeNumberProcessors; i++)*/
-/*    {*/
-/*        if (i != RunningProcessor)*/
-/*        {*/
-/*            DbgLog(("IPI_FREEZE on processor %d\n", i));*/
-/*            g_cpus[i]->Mailbox = IPI_FREEZE;*/
-/*        }*/
-/*    }*/
-
-/*    DbgLog(("Sent freeze IPI\n"));*/
-/*    DbgLog(("Waiting for response\n"));*/
-/*    count = 0;*/
-
-/*    do */
-/*    {*/
-/*        result = 1;*/
-/*        for (i=0; i<KeNumberProcessors; i++)*/
-/*        {*/
-/*            if (i != RunningProcessor)*/
-/*            {*/
-/*                if (g_cpus[i]->Mailbox == IPI_FROZEN)*/
-/*                {*/
-/*                    result += 1;*/
-/*                    DbgLog(("processor %d responded IPI_FROZEN, result=%d\n", i, result));*/
-/*                }*/
-/*            }*/
-/*        }*/
-/*        count++;*/
-/*    } while ((result != KeNumberProcessors) || (count < 0x100000));*/
-
-/*    if (count >= 0x100000)*/
-/*        DbgLog(("can't freeze cpus\n"));*/
-
-/*    DbgLog(("Cpus frozen\n"));*/
-/*    KeLowerIrql(OldIrql);*/
-/*}*/
-
-/*VOID ResumeCpus(ULONG32 RunningProcessor)*/
-/*{*/
-/*    int i, result;*/
-
-/*    DbgLog(("Resuming cpus...\n"));*/
-
-/*    for (i=0; i<KeNumberProcessors; i++)*/
-/*    {*/
-/*        if (i != RunningProcessor)*/
-/*        {*/
-/*            g_cpus[i]->Mailbox = IPI_RESUME;*/
-/*        }*/
-/*    }*/
-
-/*    do*/
-/*    {*/
-/*        result = 1;*/
-/*        for (i=0; i<KeNumberProcessors; i++)*/
-/*        {*/
-/*            if (i != RunningProcessor)*/
-/*            {*/
-/*                if (g_cpus[i]->Mailbox == IPI_RUNNING)*/
-/*                {*/
-/*                    result += 1;*/
-/*                }*/
-/*            }*/
-/*        }*/
-/*    } while (result != KeNumberProcessors);*/
-
-/*    DbgLog(("Cpus resumed\n"));*/
-
-/*}*/
-
-/*VOID FreezeExecution(PVIRT_CPU pCpu)*/
-/*{*/
-/*    if (pCpu->Mailbox == IPI_FREEZE)*/
-/*    {*/
-/*        DbgLog(("cpu %d frozen\n", pCpu->ProcessorNumber));*/
-/*        pCpu->Mailbox = IPI_FROZEN;*/
-/*        pCpu->State = STATE_FROZEN;*/
-/*        do*/
-/*        {*/
-
-/*        } while (pCpu->Mailbox != IPI_RESUME);*/
-/*        DbgLog(("cpu %d running\n", pCpu->ProcessorNumber));*/
-/*        pCpu->State = STATE_RUNNING;*/
-/*        pCpu->Mailbox = IPI_RUNNING;*/
-/*    }*/
-/*}*/
-
-VOID DumpPacket(PPACKET_HEADER pHeader)
+static VOID DumpPacket(PPACKET_HEADER pHeader)
 {
     DbgLog(("pHeader->Magic = 0x%x\n", pHeader->Magic));
     DbgLog(("pHeader->Type = 0x%x\n", pHeader->Type));
@@ -1272,48 +1219,103 @@ VOID DumpPacket(PPACKET_HEADER pHeader)
     DbgLog(("pHeader->Checksum = 0x%x\n", pHeader->Checksum));
 }
 
-
-BOOLEAN EnterDebugger(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs, ULONG64 Cr3) 
+static BOOLEAN HandleContinuePacket(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs, PVOID pPacket)
 {
-    PPACKET_HEADER pHeader;
-    PBREAKIN_PACKET pPacket;
-    ULONG32 i;
-    BOOLEAN result;
+    PCONTINUE_PACKET pContinue;
+    BOOLEAN bRes;
+    ULONG64 Rip, Rsp;
 
-    i = pCpu->ProcessorNumber;
-
-    pHeader = (PPACKET_HEADER)ReceivePacket(0x10);
-    if (pHeader == NULL)
-        return FALSE;
-
-    result = FALSE;
-    DumpPacket(pHeader);
-
-    if (pHeader->Type == PACKET_TYPE_BREAKIN)
+    pContinue = (PCONTINUE_PACKET)((PUCHAR)pPacket+sizeof(PACKET_HEADER));
+    switch (pContinue->Status)
     {
-        pPacket = (PBREAKIN_PACKET)((PUCHAR)pHeader+sizeof(PACKET_HEADER));
-        DbgLog(("pPacket->Cr3 = 0x%llx, Cr3=0x%llx\n", pPacket->Cr3, Cr3));
-        if ((pPacket->Cr3 == 0) || (pPacket->Cr3 == Cr3))
-        {
-            DbgLog(("received breakin packet\n"));
+        case CONTINUE_STATUS_SINGLE_STEP:
+            EnableTF();
+            bRes = TRUE;
+            break;
 
-            if (pCpu->State == STATE_BREAKIN)
-            {
-                DbgLog(("warning already in debug\n"));
-                result = FALSE;
-            }
-            else
-            {
-                DbgLog(("enabling single step\n"));
-                pCpu->State = STATE_BREAKIN;
-                EnableTF();
-                result = TRUE;
-            }
-        }
+        case CONTINUE_STATUS_CONTINUE:
+            DisableTF();
+            bRes = TRUE;
+            break;
+
+        case CONTINUE_STATUS_UNLOAD:
+            DbgLog(("unloading hypervisor...\n"));
+            Rip = (ULONG64)_GuestExit;
+            Rsp = pGuestRegs->rsp;
+            DbgLog(("restoring rip=0x%llx, rsp=0x%llx\n", Rip, Rsp));
+            _VmxOff(Rip, Rsp);
+            bRes = TRUE;
+            break;
+
+        default:
+            bRes = FALSE;
+            break;
     }
-    DestroyPacket(pHeader);
+    return bRes;
+}
 
-    return result;
+static BOOLEAN HandleBreakinPacket(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs, PVOID pPacket, ULONG64 Cr3)
+{
+    PBREAKIN_PACKET pBreakinPacket;
+
+    pBreakinPacket = (PBREAKIN_PACKET)((PUCHAR)pPacket+sizeof(PACKET_HEADER));
+    if ((pBreakinPacket->Cr3 == 0) || (pBreakinPacket->Cr3 == Cr3))
+    {
+        EnableTF();
+        InterlockedExchange(&(g_ControlArea->State), STATE_BREAKIN);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+
+static BOOLEAN HandleClientRequest(PVIRT_CPU pCpu, PGUEST_REGS pGuestRegs, ULONG64 Cr3)
+{
+    PVOID pPacket;
+    PPACKET_HEADER pHeader;
+    BOOLEAN bRes;
+
+    if (!g_Initialized)
+    {
+        return FALSE;
+    }
+
+/*    if (g_ControlArea->Busy)*/
+/*    {*/
+/*        return FALSE;*/
+/*    }*/
+
+/*    InterlockedIncrement(&(g_ControlArea->Busy));*/
+    pPacket = ReceivePacket();
+    if (pPacket == NULL)
+    {
+        return FALSE;
+    }
+
+    pHeader = (PPACKET_HEADER)pPacket;
+
+    switch (pHeader->Type)
+    {
+        case PACKET_TYPE_CONTINUE:
+            bRes = HandleContinuePacket(pCpu, pGuestRegs, pPacket);
+            break;
+
+        case PACKET_TYPE_BREAKIN:
+            bRes = HandleBreakinPacket(pCpu, pGuestRegs, pPacket, Cr3);
+            break;
+
+        case PACKET_TYPE_MANIPULATE_STATE:
+            bRes = HandleManipulateStatePacket(pCpu, pGuestRegs, pPacket);
+            break;
+
+        default:
+            bRes = FALSE;
+            break;
+
+    }
+    DestroyPacket(pPacket);
+/*    InterlockedDecrement(&(g_ControlArea->Busy));*/
+    return bRes;
 }
 
 

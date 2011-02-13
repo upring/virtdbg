@@ -1,14 +1,16 @@
 #include "virtdbg.h"
 
 static KMUTEX g_mutex;
-static ULONG32 g_initialized = 0;
-static ULONG32 g_processors = 0;
+static LONG g_processors = 0;
 
 PVIRT_CPU *g_cpus = NULL;
 PVIRTDBG_CONTROL_AREA g_ControlArea = NULL;
+LONG g_Initialized = 0;
 
 static PVOID g_SendArea = NULL;
 static PVOID g_RecvArea = NULL;
+
+extern PVOID g_LogBuffer;
 
 NTSTATUS VirtDbgStart(PVOID StartContext)
 {
@@ -16,6 +18,8 @@ NTSTATUS VirtDbgStart(PVOID StartContext)
     CCHAR i;
     KIRQL OldIrql;
     KAFFINITY OldAffinity;
+
+    InitLog();
 
     Status = CheckForVirtualizationSupport();
     if (Status == STATUS_UNSUCCESSFUL)
@@ -40,6 +44,7 @@ NTSTATUS VirtDbgStart(PVOID StartContext)
     RtlZeroMemory(g_cpus, KeNumberProcessors*sizeof(PVIRT_CPU));
     
     InitControlArea();
+    InitDebugLayer();
     InitProtocolLayer(g_SendArea, g_RecvArea);
 
     for (i = 0; i < KeNumberProcessors; i++) 
@@ -61,7 +66,7 @@ NTSTATUS VirtDbgStart(PVOID StartContext)
         return STATUS_UNSUCCESSFUL;
     }
     
-    InterlockedIncrement(&g_initialized);
+    InterlockedIncrement(&g_Initialized);
 
 /*    for (i = 0; i < KeNumberProcessors; i++)*/
 /*    {*/
@@ -109,12 +114,28 @@ NTSTATUS InitControlArea()
 
     g_ControlArea->RecvArea = MmGetPhysicalAddress(g_RecvArea);
 
-    g_ControlArea->KernelBase = 0;
+    g_ControlArea->KernelBase = FindNtoskrnlBase(ZwClose);
     g_ControlArea->DebuggerData = 0;
+    g_ControlArea->LogBuffer = MmGetPhysicalAddress(g_LogBuffer);
 
     return STATUS_SUCCESS;
 }
 
+#define IMAGE_DOS_SIGNATURE 0x5a4d
+
+static PVOID FindNtoskrnlBase(PVOID Addr)
+{
+    /// Scandown from a given symbol’s address.
+    Addr = (PVOID)((ULONG_PTR)Addr & ~0xfff);
+    __try {
+        while ((*(PUSHORT)Addr != IMAGE_DOS_SIGNATURE)) {
+            Addr = (PVOID) ((ULONG_PTR)Addr - PAGE_SIZE);
+        }
+        return Addr;
+    }
+    __except(1) { }
+    return NULL;
+}
 
 NTSTATUS StartVirtualization(PVOID GuestRsp)
 {

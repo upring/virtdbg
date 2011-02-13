@@ -5,6 +5,26 @@
 #include "misc.h"
 #include "mem.h"
 
+typedef struct _VIRTDBG_CONTROL_AREA
+{
+    ULONG32 Magic1;
+    ULONG32 Magic2;
+    PHYSICAL_ADDRESS SendArea;
+    PHYSICAL_ADDRESS RecvArea;
+    PVOID KernelBase;
+    PVOID DebuggerData;
+    PHYSICAL_ADDRESS LogBuffer;
+    ULONG32 ClientId;
+    ULONG32 ServerId;
+    ULONG32 LastClientId;
+    ULONG32 LastServerId;
+    LONG State;
+} VIRTDBG_CONTROL_AREA, *PVIRTDBG_CONTROL_AREA;
+
+#define CONTROL_AREA_SIZE 0x1000
+#define CONTROL_AREA_MAGIC1 0xbabebabe
+#define CONTROL_AREA_MAGIC2 0xcafecafe
+
 typedef struct _PACKET_HEADER {
     ULONG32 Magic;
     ULONG32 Type;
@@ -20,6 +40,7 @@ typedef struct _BREAKIN_PACKET {
 
 #define CONTINUE_STATUS_SINGLE_STEP 0x1
 #define CONTINUE_STATUS_UNLOAD 0x2
+#define CONTINUE_STATUS_CONTINUE 0x3
 
 typedef struct _CONTINUE_PACKET {
     ULONG32 Status;
@@ -138,16 +159,16 @@ typedef struct _MANIPULATE_STATE_PACKET {
 
 #define MAX_PACKET_SIZE 0x800
 
-#define MAX_RETRIES 0x1000000
+#define MAX_RETRIES 0x10000000
 
 NTSTATUS InitProtocolLayer(PVOID SendArea, PVOID RecvArea);
-PVOID ReceivePacket(ULONG32 Retries);
+PVOID ReceivePacket();
 BOOLEAN SendPacket(PVOID pPacket, ULONG32 Retries);
 VOID DestroyPacket(PVOID pPacket);
 
-PVOID CreateBreakinPacket();
+static PVOID CreateBreakinPacket();
 PVOID CreateManipulateStatePacket(ULONG32 ApiNumber, ULONG32 Data2Size);
 PVOID CreateStateChangePacket(ULONG32 Exception, ULONG64 Address);
-ULONG32 CalcChecksum(PVOID Src, ULONG32 Size);
+static ULONG32 CalcChecksum(PVOID Src, ULONG32 Size);
 
 #endif

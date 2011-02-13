@@ -6,13 +6,10 @@ NTSTATUS DriverUnload(PDRIVER_OBJECT DriverObject)
     KIRQL OldIrql;
     KAFFINITY OldAffinity;
     
-    DbgLog(("unloading hypervisor\n"));
-
     for (i=0; i<KeNumberProcessors; i++)
     {
         OldAffinity = KeSetSystemAffinityThreadEx((KAFFINITY)(1<<i));
         OldIrql = KeRaiseIrqlToDpcLevel();
-        DbgLog(("stopping virtualisation\n"));
         _StopVirtualization();
         KeLowerIrql(OldIrql);
         KeRevertToUserAffinityThreadEx(OldAffinity);

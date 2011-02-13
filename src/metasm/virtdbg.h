@@ -54,9 +54,12 @@ typedef struct _VIRTDBG_CONTROL_AREA
     PHYSICAL_ADDRESS RecvArea;
     PVOID KernelBase;
     PVOID DebuggerData;
-    PVOID LogBuffer;
+    PHYSICAL_ADDRESS LogBuffer;
     ULONG32 ClientId;
     ULONG32 ServerId;
+    ULONG32 LastClientId;
+    ULONG32 LastServerId;
+    LONG State;
 } VIRTDBG_CONTROL_AREA, *PVIRTDBG_CONTROL_AREA;
 
 #define CONTROL_AREA_SIZE 0x1000
@@ -78,6 +81,7 @@ typedef struct _BREAKIN_PACKET {
 
 #define CONTINUE_STATUS_SINGLE_STEP 0x1
 #define CONTINUE_STATUS_UNLOAD 0x2
+#define CONTINUE_STATUS_CONTINUE 0x3
 
 typedef struct _CONTINUE_PACKET {
     ULONG32 Status;
