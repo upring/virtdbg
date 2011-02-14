@@ -184,7 +184,7 @@ class FireWireMem < VirtualString
     end
 
     def rewrite_at(addr, data)
-        puts "1394: rewrite @ #{addr.to_s(16)} #{data.length.to_s(16)} bytes"
+#         puts "1394: rewrite @ #{addr.to_s(16)} #{data.length.to_s(16)} bytes"
         @device.internal_write(addr, data)
     end
 
@@ -356,7 +356,8 @@ class StateChangePacket < VirtDbgPacket
 end
 
 PAGE_SIZE = 0x1000
-MAX_PFN = 0x7c000
+MAX_PFN = 0x80000
+# 7c000
 MIN_PFN = 0
 
 class VirtDbgImpl
@@ -522,7 +523,7 @@ class VirtDbgImpl
                 packet = ReadVirtualMemoryPacket.new
                 offset = header.length+data1.length
                 size = header.size-data1.length
-                puts "offset=0x#{offset.to_s(16)}, size=0x#{size.to_s(16)}"
+#                 puts "offset=0x#{offset.to_s(16)}, size=0x#{size.to_s(16)}"
                 data2 = data[offset, size]
                 packet.data2 = data2
 
@@ -720,12 +721,12 @@ class VirtDbgMem < VirtualString
     end
 
     def rewrite_at(addr, data)
-        puts "virtdbgmem: rewrite @ #{addr.to_s(16)} #{data.length.to_s(16)} bytes"
+#         puts "virtdbgmem: rewrite @ #{addr.to_s(16)} #{data.length.to_s(16)} bytes"
         @impl.write_virtual_memory(addr, data)
     end
 
     def get_page(addr, len=@pagelength)
-        puts "virtdbgmem: get page @ #{addr.to_s(16)}, #{len} bytes"
+#         puts "virtdbgmem: get page @ #{addr.to_s(16)}, #{len} bytes"
         buf = @impl.read_virtual_memory(addr, len)
         buf
     end
@@ -848,13 +849,24 @@ class VirtDbg < Debugger
     end
 
     def dumplog(arg=nil)
-        @impl.dumplog
+        puts @impl.dumplog
+    end
+
+    def handshake(arg=nil)
+        puts @impl.handshake
+    end
+
+    def loadkernel(arg=nil)
+        gui.parent_widget.mem.focus_addr @impl.area.kernelbase
+        loadsyms @impl.area.kernelbase
     end
 
     def ui_command_setup(ui)
-        ui.new_command('idt', 'dump idt') { |arg| ui.wrap_run { dump_idt arg } }
-        ui.new_command('processes', 'list processes') { |arg| ui.wrap_run { list_processes arg} } 
-        ui.new_command('dumplog', 'dump virtdbg log') { |arg| ui.wrap_run { dumplog arg} }
+        ui.new_command('idt', 'dump idt') { |arg| dump_idt arg } 
+        ui.new_command('processes', 'list processes') { |arg| list_processes arg } 
+        ui.new_command('dumplog', 'dump virtdbg log') { |arg| dumplog arg } 
+        ui.new_command('handshake', 'negociate a client id with virtdbg') { |arg| handshake arg } 
+        ui.new_command('loadkernel', 'load kernel symbols') { |arg| loadkernel arg } 
     end
  
 end
@@ -865,6 +877,8 @@ $impl = VirtDbgImpl.new($mem)
 $impl.setup
 $dbg = VirtDbg.new($impl)
 w = Gui::DbgWindow.new($dbg, 'virtdbg')
+# w.dbg_widget.mem.focus_addr $impl.area.kernelbase
+# $dbg.loadsyms $impl.area.kernelbase
 Gui.main
 
 # ep = 0x8000
