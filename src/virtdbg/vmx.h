@@ -1,3 +1,9 @@
+// This file is part of Virtdbg
+// Copyright (C) 2010-2011 Damien AUMAITRE
+
+//  Licence is GPLv3, see LICENCE.txt in the top-level directory
+
+
 #ifndef _VIRTDBG_VMX_H
 #define _VIRTDBG_VMX_H
 

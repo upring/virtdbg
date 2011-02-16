@@ -1,3 +1,9 @@
+// This file is part of Virtdbg
+// Copyright (C) 2010-2011 Damien AUMAITRE
+
+//  Licence is GPLv3, see LICENCE.txt in the top-level directory
+
+
 #include "log.h"
 
 PVOID g_LogBuffer = NULL;
