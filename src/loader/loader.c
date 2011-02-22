@@ -44,8 +44,6 @@ int _cdecl main(int argc, char **argv)
         return -1;
     }
 
-    printf("buffer: %s\n", buffer);
-
     hSCManager = OpenSCManager(NULL, NULL, SC_MANAGER_CREATE_SERVICE);
 
     if (hSCManager == NULL)
@@ -59,8 +57,8 @@ int _cdecl main(int argc, char **argv)
 
     printf("Creating service ...\n");
 
-    hService = CreateServiceA(hSCManager, "Example", 
-                             "Example Driver", 
+    hService = CreateServiceA(hSCManager, "Virtdbg", 
+                             "VirtDbg driver", 
                               SERVICE_START | DELETE | SERVICE_STOP, 
                               SERVICE_KERNEL_DRIVER,
                               SERVICE_DEMAND_START, 
@@ -74,7 +72,7 @@ int _cdecl main(int argc, char **argv)
         PrintError();
         printf("Opening service...\n");
 
-        hService = OpenServiceA(hSCManager, "Example", 
+        hService = OpenServiceA(hSCManager, "Virtdbg", 
                        SERVICE_START | DELETE | SERVICE_STOP);
         if (hService == NULL)
         {
