@@ -2,4 +2,12 @@ TODO
 ====
 
 - handle firewire write in metasm client
+- add support for symbols
+- how to load kernel symbols ? a .map extension ?
+- need a version packet
+- remove ack and reset packet
+- need a FORWARD event for exception
+- need a EVENT struct inside EXCEPTION
+- changing on the fly VMCS configuration
+- include "config.h" in hypervisor
 
