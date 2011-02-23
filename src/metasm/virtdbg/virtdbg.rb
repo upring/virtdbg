@@ -22,7 +22,7 @@ module VirtDbg
         attr_accessor :header, :data1, :data2
         def initialize
             @header = VirtDbgAPI.alloc_c_struct("PACKET_HEADER")
-            @header.magic = VirtDbgAPI::PACKET_MAGIC
+            @header.Magic = VirtDbgAPI::PACKET_MAGIC
             @data1 = nil
             @data2 = nil
         end
@@ -51,70 +51,70 @@ module VirtDbg
         end
 
         def fixup
-            @header.checksum = calc_checksum(data)
-            @header.size = (@data1 ? @data1.length : 0) + (@data2 ? @data2.length : 0)
+            @header.Checksum = calc_checksum(data)
+            @header.Size = (@data1 ? @data1.length : 0) + (@data2 ? @data2.length : 0)
         end
     end
 
     class BreakinPacket < VirtDbgPacket
         def initialize(cr3=0)
             super()
-            @header.type = VirtDbgAPI::PACKET_TYPE_BREAKIN
+            @header.Type = VirtDbgAPI::PACKET_TYPE_BREAKIN
             @data1 = VirtDbgAPI.alloc_c_struct("BREAKIN_PACKET")
-            @data1.cr3 = cr3
+            @data1.Cr3 = cr3
         end
     end
 
     class ResetPacket < VirtDbgPacket
         def initialize
             super()
-            @header.type = VirtDbgAPI::PACKET_TYPE_RESET
+            @header.Type = VirtDbgAPI::PACKET_TYPE_RESET
         end
     end
 
     class AckPacket < VirtDbgPacket
         def initialize
             super()
-            @header.type = VirtDbgAPI::PACKET_TYPE_ACK
+            @header.Type = VirtDbgAPI::PACKET_TYPE_ACK
         end
     end
 
     class ContinuePacket < VirtDbgPacket
         def initialize(status=0)
             super()
-            @header.type = VirtDbgAPI::PACKET_TYPE_CONTINUE
+            @header.Type = VirtDbgAPI::PACKET_TYPE_CONTINUE
             @data1 = VirtDbgAPI.alloc_c_struct("CONTINUE_PACKET")
-            @data1.status = status
+            @data1.Status = status
         end
     end
 
     class ManipulateStatePacket < VirtDbgPacket
         def initialize
             super()
-            @header.type = VirtDbgAPI::PACKET_TYPE_MANIPULATE_STATE
+            @header.Type = VirtDbgAPI::PACKET_TYPE_MANIPULATE_STATE
             @data1 = VirtDbgAPI.alloc_c_struct("MANIPULATE_STATE_PACKET")
         end
 
         def error
-            @data1.error
+            @data1.Error
         end
     end
 
     class ReadVirtualMemoryPacket < ManipulateStatePacket
         def initialize(address=0, size=0)
             super()
-            @data1.apinumber = VirtDbgAPI::READ_VIRTUAL_MEMORY_API
-            @data1.readvirtualmemory.address = address
-            @data1.readvirtualmemory.size = size
+            @data1.ApiNumber = VirtDbgAPI::READ_VIRTUAL_MEMORY_API
+            @data1.ReadVirtualMemory.Address = address
+            @data1.ReadVirtualMemory.Size = size
         end
     end
 
     class WriteVirtualMemoryPacket < ManipulateStatePacket
         def initialize(address=0, data="")
             super()
-            @data1.apinumber = VirtDbgAPI::WRITE_VIRTUAL_MEMORY_API
-            @data1.writevirtualmemory.address = address
-            @data1.writevirtualmemory.size = data.size
+            @data1.ApiNumber = VirtDbgAPI::WRITE_VIRTUAL_MEMORY_API
+            @data1.WriteVirtualMemory.Address = address
+            @data1.WriteVirtualMemory.Size = data.size
             @data2 = data
         end
     end
@@ -122,7 +122,7 @@ module VirtDbg
     class GetContextPacket < ManipulateStatePacket
         def initialize
             super()
-            @data1.apinumber = VirtDbgAPI::GET_CONTEXT_API
+            @data1.ApiNumber = VirtDbgAPI::GET_CONTEXT_API
             @data2 = VirtDbgAPI.alloc_c_struct("DEBUG_CONTEXT")
         end
     end
@@ -130,7 +130,7 @@ module VirtDbg
     class SetContextPacket < ManipulateStatePacket
         def initialize
             super()
-            @data1.apinumber = VirtDbgAPI::SET_CONTEXT_API
+            @data1.ApiNumber = VirtDbgAPI::SET_CONTEXT_API
             @data2 = VirtDbgAPI.alloc_c_struct("DEBUG_CONTEXT")
         end
     end
@@ -138,12 +138,12 @@ module VirtDbg
     class StateChangePacket < VirtDbgPacket
         def initialize
             super()
-            @header.type = VirtDbgAPI::PACKET_TYPE_STATE_CHANGE
+            @header.Type = VirtDbgAPI::PACKET_TYPE_STATE_CHANGE
             @data1 = VirtDbgAPI.alloc_c_struct("STATE_CHANGE_PACKET")
         end
 
         def exception
-            @data1.exception
+            @data1.Exception
         end
     end
 
@@ -181,11 +181,11 @@ module VirtDbg
         end
 
         def send_area
-            @area.recvarea.quadpart if @area
+            @area.RecvArea.QuadPart if @area
         end
 
         def recv_area
-            @area.sendarea.quadpart if @area
+            @area.SendArea.QuadPart if @area
         end
 
         def find_control_area
@@ -217,9 +217,9 @@ module VirtDbg
         def handshake
             @clientid = new_clientid
             @lastid = 0
-            @area.clientid = @clientid
+            @area.ClientId = @clientid
             start = Time.now
-            while @area.serverid != @clientid
+            while @area.ServerId != @clientid
                 @mem.invalidate
                 if Time.now-start > 10.0
                     puts "can't make handshake in 10s, aborting"
@@ -233,12 +233,12 @@ module VirtDbg
 
         def dumplog
             @mem.invalidate
-            @mem[@area.logbuffer.quadpart,2048]+@mem[@area.logbuffer.quadpart+2048,2048]
+            @mem[@area.LogBuffer.QuadPart,2048]+@mem[@area.LogBuffer.QuadPart+2048,2048]
         end
 
         def send_packet_internal(packet)
-            packet.header.clientid = @clientid
-            packet.header.id = @id
+            packet.header.ClientId = @clientid
+            packet.header.Id = @id
             packet.fixup
             data = packet.encode
             @mem[self.send_area, data.length] = data
@@ -250,7 +250,7 @@ module VirtDbg
             return false if not @attached
             start = Time.now
             length = send_packet_internal(packet)
-            while @area.lastclientid != packet.header.id
+            while @area.LastClientId != packet.header.Id
                 @mem.invalidate
                 return false if Time.now-start > 2.0
             end
@@ -286,45 +286,45 @@ module VirtDbg
             data = @mem[self.recv_area, VirtDbgAPI::HEADER_SIZE]
             header = VirtDbgAPI.decode_c_struct('PACKET_HEADER', data, 0)
 
-            if header.magic != VirtDbgAPI::PACKET_MAGIC
+            if header.Magic != VirtDbgAPI::PACKET_MAGIC
     #             puts "no magic number in header"
                 return
             end
 
-            if not (0..VirtDbgAPI::MAX_PACKET_SIZE).cover? header.size 
+            if not (0..VirtDbgAPI::MAX_PACKET_SIZE).cover? header.Size 
     #             puts "packet too big"
                 return
             end
 
-            if header.id <= @lastid
+            if header.Id <= @lastid
     #             puts "not a new packet"
                 return
             end
 
-            packet_size = VirtDbgAPI::HEADER_SIZE+header.size
+            packet_size = VirtDbgAPI::HEADER_SIZE+header.Size
 
-            if header.size > 0
-                body = @mem[self.recv_area+VirtDbgAPI::HEADER_SIZE, header.size]
+            if header.Size > 0
+                body = @mem[self.recv_area+VirtDbgAPI::HEADER_SIZE, header.Size]
                 data << body
 
                 sum = calc_checksum(body)
-                if sum != header.checksum
-                    puts "bad checksum, expected #{sum.to_s(16)}, got #{header.checksum.to_s(16)}"
+                if sum != header.Checksum
+                    puts "bad checksum, expected #{sum.to_s(16)}, got #{header.Checksum.to_s(16)}"
                     return
                 end
             end
 
-            case header.type
+            case header.Type
             when VirtDbgAPI::PACKET_TYPE_RESET
                 packet = ResetPacket.new
             when VirtDbgAPI::PACKET_TYPE_MANIPULATE_STATE
                 data1 = VirtDbgAPI.decode_c_struct('MANIPULATE_STATE_PACKET', 
                                                    data, VirtDbgAPI::HEADER_SIZE)
-                case data1.apinumber
+                case data1.ApiNumber
                 when VirtDbgAPI::READ_VIRTUAL_MEMORY_API
                     packet = ReadVirtualMemoryPacket.new
                     offset = header.length+data1.length
-                    size = header.size-data1.length
+                    size = header.Size-data1.length
     #                 puts "offset=0x#{offset.to_s(16)}, size=0x#{size.to_s(16)}"
                     data2 = data[offset, size]
                     packet.data2 = data2
@@ -367,11 +367,11 @@ module VirtDbg
             end
 
             packet.header = header
-            @lastid = header.id
+            @lastid = header.Id
     #         puts packet.to_s
     #         puts data.hexdump
 
-            @area.lastserverid = header.id
+            @area.LastServerId = header.Id
             packet
         end
 

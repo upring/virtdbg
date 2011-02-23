@@ -1,5 +1,5 @@
-Documentation
-=============
+README
+======
 
 The purpose of Virtdbg is to implement a kernel debugger
 using the hardware virtualization technology provided by Intel (VT-x).
@@ -20,6 +20,11 @@ Disclaimer
 VirtDbg is in very alpha state. So I decline all responsabilities if your
 computer bluescreened ;) However I will be happy if you give it a try.
 It is under heavy development so expect a lot of changes quickly.
+
+Features
+--------
+
+TBW
 
 Dependencies
 ------------
@@ -43,6 +48,13 @@ Limitations
   in the BIOS or the hypervisor won't load.
 - You will need to run Linux or MacOSX to be able to control the hypervisor
   because of libforensic1394.
+
+
+Known bugs
+----------
+
+- Sometimes a bluescreen happens when queuing DPCS. The bugcheck says
+  "CLOCK_WATCHDOG_TIMEOUT (101)". I need to debug this...
 
 
 Quickstart
